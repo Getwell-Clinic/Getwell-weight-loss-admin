@@ -1461,6 +1461,41 @@ function getwellConfirmDelete(label){
   });
 }
 
+/*
+  A confirmation that is NOT a deletion.
+
+  Removing an attachment and deleting a record are different
+  actions with different consequences, so they get different
+  dialogs. Nothing here shares a code path with
+  getwellConfirmDelete() above, and nothing that calls this
+  removes a patient, a visit or an appointment.
+*/
+function getwellConfirmAction(options){
+  const settings = options || {};
+  return new Promise(resolve=>{
+    const wrap=document.createElement("div");
+    wrap.className="modal-wrap show";
+    wrap.style.zIndex="100000";
+    wrap.innerHTML=`
+      <div class="modal" style="width:min(460px,92vw)">
+        <div class="modal-head">
+          <div><h2>${escapeHtml(settings.title||"Confirm")}</h2><p>${escapeHtml(settings.message||"")}</p></div>
+          <button class="modal-close" type="button" data-cancel>×</button>
+        </div>
+        <div class="modal-body"><div class="row-sub">${escapeHtml(settings.note||"")}</div></div>
+        <div class="modal-foot">
+          <button class="secondary" type="button" data-cancel>${escapeHtml(settings.cancelLabel||"Cancel")}</button>
+          <button class="primary" type="button" data-confirm>${escapeHtml(settings.confirmLabel||"Confirm")}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const finish=value=>{wrap.remove();resolve(value);};
+    wrap.querySelectorAll("[data-cancel]").forEach(b=>b.addEventListener("click",()=>finish(false)));
+    wrap.querySelector("[data-confirm]").addEventListener("click",()=>finish(true));
+  });
+}
+
+
 function getwellNotify(message, kind){
   const type = kind || "info";
 
@@ -1855,6 +1890,45 @@ function getwellRemoteSave(data){
    images cannot live in the store. The binary goes to
    Drive; only {id, name, url} is persisted.
 --------------------------------------------------------- */
+
+/*
+  Remove ONE uploaded file from Drive.
+
+  Used only by "Remove PDF" on a visit. The backend trashes the
+  file if — and only if — it sits in this app's own Drive
+  folder, and it never touches a sheet, a patient or a visit.
+
+  A clinic still running an older Apps Script deployment simply
+  gets {ok:false}: the visit's reference to the PDF is cleared
+  either way, and the caller says so rather than pretending the
+  file was removed.
+*/
+function getwellDeleteFile(driveId){
+  if(!driveId) return Promise.resolve({ok:false, error:"No file id."});
+
+  if(!getwellRemoteConfigured()){
+    return Promise.resolve({ok:false, error:"Google Drive is not configured."});
+  }
+
+  return fetch(
+    GETWELL_SHEETS_API_URL,
+    {
+      method:"POST",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body: JSON.stringify({action:"deleteFile", fileId:String(driveId)})
+    }
+  )
+    .then(response => response.text())
+    .then(text => {
+      let payload;
+      try{ payload = JSON.parse(text); }
+      catch(e){ return {ok:false, error:"Drive delete rejected (deployment not updated?)."}; }
+      if(payload && payload.ok) return {ok:true};
+      return {ok:false, error:(payload && payload.error) || "Drive delete failed."};
+    })
+    .catch(error => ({ok:false, error:String(error)}));
+}
+
 
 function getwellUploadFile(file){
   if(!getwellRemoteConfigured()){
@@ -2784,6 +2858,8 @@ function getwellManualSync(){
 }
 
 window.getwellManualSync = getwellManualSync;
+window.getwellDeleteFile = getwellDeleteFile;
+window.getwellConfirmAction = getwellConfirmAction;
 
 
 /* =========================================================
@@ -7614,7 +7690,7 @@ const GETWELL_ARBOLEAF_MATCHERS = [
     same line, so they can never take a reading away from "Body
     Fat Mass" or "Muscle Mass Percentage".
   */
-  {metric:"Body Fat Percentage", need:["body fat"],    avoid:["fat ma","mass","segmental","/"], fallback:true},
+  {metric:"Body Fat Percentage", need:["body fat"],    avoid:["fat ma","fat m","mass","segmental","/"], fallback:true},
   {metric:"Muscle Mass",         need:["muscle mass"], avoid:["percentage","skeletal","control"], fallback:true}
 ];
 
@@ -7837,6 +7913,646 @@ function getwellReadMetricFragment(fragment, definition, depth){
 }
 
 
+
+/* =========================================================
+   ARBOLEAF LAYOUT PARSER
+   ---------------------------------------------------------
+   The Arboleaf export carries no text at all: both pages are
+   a single flat image, so every figure on the report reaches
+   this app through OCR. OCR returns words WITH THEIR POSITION
+   on the page, and position is the only thing that says which
+   printed label a number belongs to.
+
+   WHY THIS EXISTS
+   ---------------
+   The report's first table is a staircase: Body Water, Soft
+   Lean Mass, Fat Free Mass and Weight are printed in merged
+   cells that span two, three and four rows, so their figures
+   float BETWEEN the labelled rows rather than on them. Read as
+   flat text the top-left table says
+
+       Body Water (L)  46.3  46.3  60.9  64.1  85.75  42.9~55.7
+
+   and any parser that takes "a number near the label" will
+   hand 64.1 — the Fat-Free Mass — to Weight. It is the same
+   number for a 173cm man either way, which is precisely what
+   makes it dangerous.
+
+   WHAT THIS DOES INSTEAD
+   ----------------------
+   Every reading is tied to a printed label by geometry:
+
+     * a label is the words of one printed phrase, including
+       the lines it wraps onto and its unit — "LBM / Fat-free
+       Body / Weight" is one label, not a Weight;
+     * a reading sits on that label's own row, to its right,
+       inside its own column;
+     * where the report prints a normal range, the reading
+       shares a baseline with the range and stands to its left.
+       The staircase figures share a baseline with nothing, so
+       they are never read as anybody's measurement;
+     * chart scales and tick-box rows are recognised and
+       discarded;
+     * a printed unit that disagrees with the metric
+       disqualifies the number;
+     * a figure outside the metric's physiological bounds is
+       dropped, not offered.
+
+   Nothing is guessed and nothing is positional beyond the
+   report's own printed structure, so a different Arboleaf
+   layout does not need new code — it needs, at most, another
+   label spelling in GETWELL_ARBOLEAF_MATCHERS.
+
+   Whatever comes back is still only a STARTING POINT. It is
+   shown in the review grid for staff to confirm or correct,
+   and a metric this parser cannot place with confidence is
+   left BLANK, because an empty box a nurse fills in is safer
+   than a body-composition figure that is quietly wrong.
+========================================================= */
+
+/* Bumped whenever the mapping rules change, and stored on the
+   visit as arboleafParserVersion so a value can be traced back
+   to the reader that produced it. */
+const GETWELL_ARBOLEAF_PARSER_VERSION = "layout-2026-09";
+
+function getwellArbSquash(text){
+  return String(text || "").toLowerCase().replace(/[^a-z0-9%<>~.\-+/]/g, "");
+}
+
+/* Approximate substring search (Sellers). One edit, no more:
+   enough to survive OCR dropping a character out of
+   "Visceral", never enough to let one label answer to another. */
+function getwellArbFuzzyIncludes(haystack, needle, tolerance){
+  if(!needle) return false;
+  if(haystack.indexOf(needle) >= 0) return true;
+  if(!tolerance) return false;
+
+  const n = needle.length;
+  let row = new Array(n + 1);
+  for(let i = 0; i <= n; i++) row[i] = i;
+
+  for(let j = 0; j < haystack.length; j++){
+    const next = new Array(n + 1);
+    next[0] = 0;
+    for(let i = 1; i <= n; i++){
+      const cost = needle[i - 1] === haystack[j] ? 0 : 1;
+      next[i] = Math.min(row[i] + 1, next[i - 1] + 1, row[i - 1] + cost);
+    }
+    if(next[n] <= tolerance) return true;
+    row = next;
+  }
+  return false;
+}
+
+function getwellArbTolerance(token){
+  return token.replace(/[^a-z0-9]/g, "").length >= 7 ? 1 : 0;
+}
+
+const GETWELL_ARB_NUMBER = /^[({\[]?([+-]?\d+(?:\.\d+)?)\s*(kg\/m2|kg\/m²|kcal|kg|lbs|%|l)?[)}\],;:.]?$/i;
+const GETWELL_ARB_RANGE  = /^[({\[]?(?:(?:([+-]?\d+(?:\.\d+)?)\s*~\s*([+-]?\d+(?:\.\d+)?))|(?:<\s*=?\s*([+-]?\d+(?:\.\d+)?)))[)}\],;:.]?$/;
+
+const GETWELL_ARB_AXIS_WORDS = [
+  "under","over","normal","lack","insufficient","developed","balanced",
+  "uneven","sufficient","severely","slightly","obesity","mild","excessively"
+];
+
+
+/* ---------- words ---------- */
+
+function getwellArbNormalizeWord(text){
+  return String(text || "")
+    .replace(/[|¦︱│]/g, " ")
+    .replace(/[—–−‐‑]/g, "-")
+    .replace(/[〜～≈]/g, "~")
+    .replace(/(\d),(\d{3})\b/g, "$1$2")
+    .trim();
+}
+
+function getwellArbPrepareWords(rawWords){
+  return (rawWords || [])
+    .map(word => ({
+      text: getwellArbNormalizeWord(word.text),
+      x0: Number(word.x0), y0: Number(word.y0),
+      x1: Number(word.x1), y1: Number(word.y1),
+      conf: Number.isFinite(Number(word.conf)) ? Number(word.conf) : 100,
+      page: Number(word.page) || 1
+    }))
+    .filter(word =>
+      word.text &&
+      Number.isFinite(word.x0) && Number.isFinite(word.y0) &&
+      Number.isFinite(word.x1) && Number.isFinite(word.y1) &&
+      word.x1 > word.x0 && word.y1 > word.y0 &&
+      /[A-Za-z0-9]/.test(word.text) &&
+      word.conf >= 25);
+}
+
+function getwellArbBuildLines(words){
+  const sorted = words.slice().sort((a, b) =>
+    (a.page - b.page) || ((a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2) || (a.x0 - b.x0));
+
+  const lines = [];
+  sorted.forEach(word => {
+    const centre = (word.y0 + word.y1) / 2;
+    const height = word.y1 - word.y0;
+    const line = lines[lines.length - 1];
+    const fits = line && line.page === word.page &&
+      Math.abs(centre - line.centre) <= Math.max(10, 0.55 * Math.max(height, line.height));
+
+    if(fits){
+      line.words.push(word);
+      line.y0 = Math.min(line.y0, word.y0);
+      line.y1 = Math.max(line.y1, word.y1);
+      line.height = Math.max(line.height, height);
+      line.centre = (line.y0 + line.y1) / 2;
+    }else{
+      lines.push({page:word.page, words:[word], y0:word.y0, y1:word.y1, height, centre});
+    }
+  });
+
+  lines.forEach(line => line.words.sort((a, b) => a.x0 - b.x0));
+  return lines;
+}
+
+/*
+  Put one number back together after OCR split it.
+
+  Two joins, both deliberately narrow:
+
+    "5" "5"        -> "55"    fragments touching, one number
+    "69" "4"       -> "69.4"  the decimal point of a large
+                              display figure, which OCR drops or
+                              reads as a stray glyph
+
+  Both need matching type size and a gap thinner than half a
+  character, so two readings printed in neighbouring table
+  cells can never be welded into one, and "69.4" beside "/100"
+  cannot swallow the 100.
+*/
+function getwellArbGlueLine(line){
+  const numeric = text => /^[+-]?\d+$/.test(text);
+  const numericish = text => /^[+-]?[\d.,]+%?$/.test(text);
+  const joiner = text => /^[.,·]$/.test(text);
+
+  /* A tiny, unsure glyph between two big numerals is the
+     decimal point the engine could not read. */
+  const words = line.words.filter((word, index) => {
+    if(index === 0 || index === line.words.length - 1) return true;
+    const before = line.words[index - 1], after = line.words[index + 1];
+    const small = (word.y1 - word.y0) < 0.5 * Math.min(before.y1 - before.y0, after.y1 - after.y0);
+    return !(small && word.conf < 70 && word.text.length <= 2 &&
+             numericish(before.text) && /^[\d]/.test(after.text));
+  });
+
+  const out = [];
+  words.forEach(word => {
+    const previous = out[out.length - 1];
+
+    if(previous){
+      const gap = word.x0 - previous.x1;
+      const hereH = word.y1 - word.y0;
+      const thereH = previous.y1 - previous.y0;
+      const scale = Math.max(hereH, thereH);
+      const sameSize = Math.max(hereH, thereH) / Math.max(1, Math.min(hereH, thereH)) <= 1.6;
+
+      /* touching fragments of one number */
+      if((numericish(previous.text) || joiner(previous.text)) &&
+         (numericish(word.text) || joiner(word.text)) &&
+         (sameSize || joiner(word.text) || joiner(previous.text)) &&
+         gap >= -2 && gap <= 0.25 * scale &&
+         ((previous.text + word.text).match(/\./g) || []).length <= 1){
+        previous.text += word.text;
+        previous.x1 = Math.max(previous.x1, word.x1);
+        previous.y0 = Math.min(previous.y0, word.y0);
+        previous.y1 = Math.max(previous.y1, word.y1);
+        previous.conf = Math.min(previous.conf, word.conf);
+        return;
+      }
+
+      /* the missing decimal point of a large figure */
+      const tail = word.text.replace(/[^\d].*$/, "");
+      if(numeric(previous.text) && previous.text.replace(/[+-]/, "").length >= 2 &&
+         /^\d{1,2}$/.test(tail) &&
+         Math.max(hereH, thereH) / Math.max(1, Math.min(hereH, thereH)) <= 1.35 &&
+         gap > 0.25 * scale && gap <= 0.55 * scale){
+        previous.text = previous.text + "." + tail;
+        previous.x1 = Math.max(previous.x1, word.x1);
+        previous.y0 = Math.min(previous.y0, word.y0);
+        previous.y1 = Math.max(previous.y1, word.y1);
+        previous.conf = Math.min(previous.conf, word.conf);
+        return;
+      }
+    }
+
+    out.push(Object.assign({}, word));
+  });
+
+  line.words = out;
+  return line;
+}
+
+/* Neighbouring words of one printed phrase. Numbers are left
+   out: a label is words, and letting a value join the label
+   run is how "Fitness score 69" stops looking like a label at
+   all. */
+function getwellArbLabelRuns(line){
+  const runs = [];
+  line.words.filter(word => !/\d/.test(word.text)).forEach(word => {
+    const run = runs[runs.length - 1];
+    const height = Math.max(word.y1 - word.y0, run ? run.y1 - run.y0 : 0);
+
+    if(run && word.x0 - run.x1 <= 1.2 * height){
+      run.words.push(word);
+      run.x1 = Math.max(run.x1, word.x1);
+      run.y0 = Math.min(run.y0, word.y0);
+      run.y1 = Math.max(run.y1, word.y1);
+    }else{
+      runs.push({page:line.page, words:[word], x0:word.x0, x1:word.x1, y0:word.y0, y1:word.y1});
+    }
+  });
+
+  runs.forEach(run => run.text = run.words.map(w => w.text).join(" "));
+  return runs;
+}
+
+
+/* ---------- label blocks ---------- */
+
+/*
+  A printed label can wrap: "Body Fat" / "Mass" / "(kg)", or
+  "LBM" / "Fat-free Body" / "Weight". A wrapped label is ONE
+  label, and reading it as two is exactly how a value ends up
+  under the wrong name — the "Weight" on the third line of the
+  LBM cell does not name a Weight reading.
+*/
+function getwellArbBuildLabelBlocks(lines){
+  const runsByLine = lines.map(getwellArbLabelRuns);
+  const used = new Set();
+  const blocks = [];
+  const key = (i, j) => i + ":" + j;
+
+  runsByLine.forEach((runs, i) => {
+    runs.forEach((run, j) => {
+      if(used.has(key(i, j))) return;
+
+      const block = {page:run.page, runs:[run], x0:run.x0, x1:run.x1, y0:run.y0, y1:run.y1};
+      used.add(key(i, j));
+
+      let fromLine = i;
+      let anchor = run;
+
+      /* A printed unit on its own line — "(kg)", "(L)", "(%)" —
+         closes the label. Without that, the label of the row
+         underneath gets swallowed and its value read as this
+         metric's. */
+      const closes = text => /^\(\s*[a-z%\/²2]{1,6}\s*\)$/i.test(String(text).trim());
+      if(closes(run.text)){ /* nothing follows a unit */ }
+
+      for(let ahead = 1; ahead <= 4 && !closes(anchor.text); ahead++){
+        let nextIndex = fromLine + 1;
+        /* A line of nothing but figures is the row's values, not
+           a continuation of its label — step over it. */
+        while(nextIndex < runsByLine.length && lines[nextIndex] &&
+              lines[nextIndex].page === block.page && !runsByLine[nextIndex].length){
+          nextIndex++;
+        }
+        const next = runsByLine[nextIndex];
+        if(!next || !next.length || next[0].page !== block.page) break;
+
+        const height = Math.max(1, anchor.y1 - anchor.y0);
+        let joined = null, joinedAt = -1;
+
+        next.forEach((candidate, cj) => {
+          if(joined || used.has(key(nextIndex, cj))) return;
+          if(Math.abs(candidate.x0 - anchor.x0) > 0.9 * height) return;
+          if(candidate.y0 - anchor.y1 > 1.0 * height) return;
+          joined = candidate; joinedAt = cj;
+        });
+
+        if(!joined) break;
+
+        used.add(key(nextIndex, joinedAt));
+        block.runs.push(joined);
+        block.x0 = Math.min(block.x0, joined.x0);
+        block.x1 = Math.max(block.x1, joined.x1);
+        block.y1 = Math.max(block.y1, joined.y1);
+        anchor = joined;
+        fromLine = nextIndex;
+      }
+
+      block.text = block.runs.map(r => r.text).join(" ").toLowerCase();
+      block.squashed = getwellArbSquash(block.text);
+      block.height = block.runs.reduce((sum, r) => sum + (r.y1 - r.y0), 0) / block.runs.length;
+      blocks.push(block);
+    });
+  });
+
+  /* A label is short. A sentence of advice is not a label. */
+  return blocks.filter(block =>
+    block.text.length <= 60 && block.text.split(/\s+/).length <= 8);
+}
+
+function getwellArbMatchLabel(block, matchers){
+  let best = null;
+
+  matchers.forEach(matcher => {
+    const needs = matcher.need.map(getwellArbSquash);
+    const avoids = (matcher.avoid || []).map(getwellArbSquash).filter(Boolean);
+
+    if(!needs.every(token =>
+      getwellArbFuzzyIncludes(block.squashed, token, getwellArbTolerance(token)))) return;
+    if(avoids.some(token => block.squashed.indexOf(token) >= 0)) return;
+
+    const weight = needs.reduce((sum, token) => sum + token.length, 0)
+                 - (matcher.fallback ? 100 : 0);
+    if(!best || weight > best.weight) best = {matcher, weight};
+  });
+
+  return best ? best.matcher : null;
+}
+
+
+/* ---------- reading a labelled row ---------- */
+
+function getwellArbNumberFrom(word){
+  const match = GETWELL_ARB_NUMBER.exec(word.text);
+  if(!match) return null;
+  /* "00" is the tail of "/100", not a reading. No measurement on
+     this report is printed with a leading zero before a digit. */
+  if(/^[+-]?0\d/.test(match[1])) return null;
+  const value = Number(match[1]);
+  if(!Number.isFinite(value)) return null;
+  let unit = (match[2] || "").toLowerCase();
+  if(unit === "kg/m2" || unit === "kg/m²") unit = "kg/m²";
+  return {value, unit};
+}
+
+function getwellArbRangeFrom(word){
+  const match = GETWELL_ARB_RANGE.exec(word.text);
+  if(!match) return null;
+  if(match[3] !== undefined) return {low:null, high:Number(match[3])};
+  const low = Number(match[1]), high = Number(match[2]);
+  if(!Number.isFinite(low) || !Number.isFinite(high)) return null;
+  return {low, high};
+}
+
+function getwellArbCluster(items, tolerance){
+  const sorted = items.slice().sort((a, b) => a.centre - b.centre);
+  const clusters = [];
+  sorted.forEach(item => {
+    const cluster = clusters[clusters.length - 1];
+    if(cluster && item.centre - cluster.last <= tolerance){
+      cluster.items.push(item);
+      cluster.last = item.centre;
+    }else{
+      clusters.push({items:[item], last:item.centre});
+    }
+  });
+  clusters.forEach(cluster => {
+    cluster.centre = cluster.items.reduce((s, i) => s + i.centre, 0) / cluster.items.length;
+  });
+  return clusters;
+}
+
+/*
+  Read the measurement that belongs to ONE label.
+
+  The report's own structure does the work:
+
+    * the reading sits on the label's printed row and to the
+      RIGHT of it, inside the label's own column — the row is
+      cut at the first wide gap, so the panel in the next
+      column can never contribute a number;
+    * where the report prints a normal range, the reading
+      shares a baseline with that range and stands to its left.
+      That is what separates a real reading from the merged
+      column of the stacked table at the top of page 1, whose
+      Weight and Fat-Free Mass figures drift across three rows
+      and belong to none of them;
+    * a scale ("55 85 115 145 175 205%") is a run of climbing
+      numbers, and a tick-box row ("Under Normal Over") is
+      words, not measurements. Both are discarded;
+    * a printed unit that disagrees with the metric disqualifies
+      the number;
+    * anything outside the metric's physiological bounds is
+      dropped rather than offered.
+
+  Nothing is inferred. If none of that identifies a value the
+  function returns null and the field is left blank.
+*/
+
+/*
+  The tick labels of a bar chart, removed.
+
+  A scale is a row of numbers printed at even intervals — "55
+  85 115 145 175 205%", "10 18.5 25 35 45 55". The reading
+  itself is deliberately printed OFF that grid, above the bar's
+  end, so the numbers that sit ON an even grid of four or more
+  are scale and everything else survives. Reading a tick as a
+  measurement is exactly how a BMI of 28.7 turns into 10, so
+  this runs before any value is chosen — and it does not depend
+  on the ticks being in ascending order, because OCR turning
+  "18.5" into "185" must not disguise the scale.
+*/
+function getwellArbDropTickScale(items){
+  if(items.length < 4) return items;
+
+  const ordered = items.slice().sort((a, b) => a.x0 - b.x0);
+  const gaps = [];
+  for(let i = 1; i < ordered.length; i++) gaps.push(ordered[i].x0 - ordered[i - 1].x0);
+  const sortedGaps = gaps.slice().sort((a, b) => a - b);
+  const step = sortedGaps[Math.floor(sortedGaps.length / 2)];
+  if(!(step > 0)) return items;
+
+  let best = [];
+  for(let start = 0; start < ordered.length; start++){
+    const chain = [start];
+    let last = start;
+    for(let k = start + 1; k < ordered.length; k++){
+      if(Math.abs((ordered[k].x0 - ordered[last].x0) - step) <= 0.35 * step){
+        chain.push(k); last = k;
+      }
+    }
+    if(chain.length > best.length) best = chain;
+  }
+
+  if(best.length < 4) return items;
+
+  const scale = new Set(best.map(index => ordered[index]));
+  return items.filter(item => !scale.has(item));
+}
+
+function getwellArbReadRow(block, definition, words, pageWidth){
+  const pad = Math.max(8, 0.45 * block.height);
+  const top = block.y0 - pad;
+  const bottom = block.y1 + pad;
+  const leftEdge = block.x1 - 0.15 * block.height;
+
+  let inRow = words
+    .filter(word => word.page === block.page)
+    .map(word => Object.assign({centre:(word.y0 + word.y1) / 2}, word))
+    .filter(word => word.centre >= top && word.centre <= bottom && word.x0 >= leftEdge)
+    .sort((a, b) => a.x0 - b.x0);
+
+  /* Cut the row where this column ends. The gap that separates
+     two columns of the report is far wider than the gap between
+     the tick labels of a bar chart, so the panel printed beside
+     this row can never contribute a number to it. */
+  const columnGap = Math.max(6 * block.height, 0.10 * (pageWidth || 2000));
+  const cut = inRow.findIndex((word, i) =>
+    i > 0 && word.x0 - inRow[i - 1].x1 > columnGap);
+  if(cut > 0) inRow = inRow.slice(0, cut);
+  if(!inRow.length) return null;
+
+  const tolerance = Math.max(12, 0.8 * block.height);
+
+  let printedRange = null;
+  let rangeAt = Infinity;
+  let rangeCentre = null;
+  inRow.forEach(word => {
+    const range = getwellArbRangeFrom(word);
+    if(range && !printedRange){
+      printedRange = range; rangeAt = word.x0; rangeCentre = word.centre;
+    }
+  });
+
+  const numbers = inRow
+    .filter(word => !getwellArbRangeFrom(word))
+    .map(word => {
+      const number = getwellArbNumberFrom(word);
+      return number ? Object.assign({}, word, number) : null;
+    })
+    .filter(Boolean)
+    .filter(entry => entry.x1 <= rangeAt + 2);
+
+  if(!numbers.length) return null;
+
+  let clusters = getwellArbCluster(numbers, tolerance);
+
+  /* Chart scales and tick-box rows are not readings. */
+  clusters.forEach(cluster => {
+    cluster.items = getwellArbDropTickScale(cluster.items);
+  });
+  clusters = clusters.filter(cluster => {
+    if(!cluster.items.length) return false;
+    const axis = inRow.some(word =>
+      Math.abs(word.centre - cluster.centre) <= tolerance &&
+      !getwellArbNumberFrom(word) && !getwellArbRangeFrom(word) &&
+      GETWELL_ARB_AXIS_WORDS.some(token =>
+        getwellArbFuzzyIncludes(getwellArbSquash(word.text), token, getwellArbTolerance(token))));
+    return !axis;
+  });
+
+  if(!clusters.length) return null;
+
+  /* With a printed range, the reading shares its baseline. */
+  let pool;
+  if(printedRange !== null){
+    clusters.sort((a, b) =>
+      Math.abs(a.centre - rangeCentre) - Math.abs(b.centre - rangeCentre));
+    pool = clusters[0].items;
+  }else{
+    pool = [].concat.apply([], clusters.map(cluster => cluster.items));
+  }
+
+  const min = Number.isFinite(definition.min) ? definition.min : -Infinity;
+  const max = Number.isFinite(definition.max) ? definition.max : Infinity;
+  const wanted = String(definition.unit || "").toLowerCase();
+
+  const viable = pool.filter(entry => {
+    if(entry.value < min || entry.value > max) return false;
+    if(entry.unit && wanted && entry.unit !== wanted && !definition.byUnitOk) return false;
+    return true;
+  });
+
+  if(!viable.length) return null;
+
+  const score = entry => {
+    let points = printedRange ? 4 : 0;
+    if(entry.unit && wanted && entry.unit === wanted) points += 2;
+    if(printedRange){
+      const high = printedRange.high;
+      const low = printedRange.low === null ? 0 : printedRange.low;
+      if(entry.value >= low * 0.4 && entry.value <= high * 2.5) points += 3;
+      else if(entry.value >= low * 0.2 && entry.value <= high * 5) points += 1;
+      else points -= 4;
+    }
+    return points;
+  };
+
+  viable.sort((a, b) => (score(b) - score(a)) || (a.x0 - b.x0));
+  const winner = viable[0];
+
+  return {
+    value: winner.value,
+    unit: winner.unit || definition.unit || "",
+    anchored: !!printedRange,
+    confirmed: !!printedRange && score(winner) >= 7
+  };
+}
+
+
+/* =========================================================
+   THE PARSER
+========================================================= */
+
+function getwellParseArboleafLayout(rawWords, options){
+  const matchers = (options && options.matchers) || GETWELL_ARBOLEAF_MATCHERS;
+  const define = (options && options.define) || getwellMetricDefinition;
+
+  const words = getwellArbPrepareWords(rawWords);
+  if(words.length < 12) return null;
+
+  const lines = getwellArbBuildLines(words).map(getwellArbGlueLine);
+  const glued = [];
+  lines.forEach(line => line.words.forEach(word => glued.push(word)));
+
+  const blocks = getwellArbBuildLabelBlocks(lines);
+  const pageWidth = words.reduce((widest, word) => Math.max(widest, word.x1), 0);
+
+  const held = {};
+
+  blocks.forEach(block => {
+    const matcher = getwellArbMatchLabel(block, matchers);
+    if(!matcher) return;
+
+    let metricName = matcher.metric;
+    let definition = define(metricName);
+    if(matcher.byUnit) definition = Object.assign({}, definition, {byUnitOk:true, unit:""});
+
+    const reading = getwellArbReadRow(block, definition, glued, pageWidth);
+    if(!reading) return;
+
+    if(matcher.byUnit){
+      const key = String(reading.unit || "").toLowerCase();
+      metricName = matcher.byUnit[key] || matcher.byUnit["kg"] || metricName;
+      const target = define(metricName);
+      if(Number.isFinite(target.min) && reading.value < target.min) return;
+      if(Number.isFinite(target.max) && reading.value > target.max) return;
+      reading.unit = target.unit;
+    }
+
+    const points = (reading.confirmed ? 4 : 0) + (reading.anchored ? 2 : 0);
+    const previous = held[metricName];
+    if(previous && previous.points >= points) return;
+
+    held[metricName] = {reading, points, label:block.text};
+  });
+
+  const metrics = {};
+  const flagged = [];
+  const debug = [];
+
+  Object.keys(held).forEach(name => {
+    const {reading, label} = held[name];
+    metrics[name] = {value:reading.value, unit:reading.unit || ""};
+    if(!reading.confirmed) flagged.push(name);
+    debug.push({metric:name, label, value:reading.value, unit:reading.unit || "", confirmed:reading.confirmed});
+  });
+
+  return {metrics, flagged, debug, engine:"layout"};
+}
+
+
 /*
   Parse a whole Arboleaf report.
 
@@ -8015,4 +8731,100 @@ function getwellParseArboleafReport(text){
   }
 
   return {metrics, flagged};
+}
+
+
+/* =========================================================
+   ONE ENTRY POINT FOR READING A REPORT
+   ---------------------------------------------------------
+   The upload path hands over whatever the PDF gave up:
+
+     words - every word with its box on the page, from the
+             text layer or from OCR. When they are there the
+             layout parser runs, because position is what ties
+             a figure to its printed label.
+     text  - the same report as flat lines. Used on its own
+             only when there are no boxes to work with, and as
+             a second opinion when the layout parser recovered
+             almost nothing.
+
+   Neither parser ever writes to a visit. Both return a set of
+   suggestions for the review grid.
+========================================================= */
+
+function getwellReadArboleafReport(source){
+  const words = (source && source.words) || null;
+  const text  = String((source && source.text) || "");
+
+  let result = null;
+
+  if(words && words.length){
+    try{
+      result = getwellParseArboleafLayout(words);
+    }catch(error){
+      console.error("Arboleaf layout parser failed:", error);
+      result = null;
+    }
+  }
+
+  /* Flat text is the fallback, and also the tie-breaker when
+     the boxes yielded almost nothing — a text-layer export
+     with an unusual layout can still read fine as lines. */
+  const recovered = result ? Object.keys(result.metrics).length : 0;
+
+  if(recovered < 3 && text.replace(/\s/g, "").length >= 40){
+    try{
+      const lineBased = getwellParseArboleafReport(text);
+      if(Object.keys(lineBased.metrics).length > recovered){
+        result = Object.assign({engine:"text", debug:[]}, lineBased);
+      }
+    }catch(error){
+      console.error("Arboleaf text parser failed:", error);
+    }
+  }
+
+  if(!result) return {metrics:{}, flagged:[], debug:[], engine:"none"};
+
+  result.version = GETWELL_ARBOLEAF_PARSER_VERSION;
+  return result;
+}
+
+
+/*
+  Development aid. Prints exactly what the reader decided, so a
+  wrong figure can be traced to the label it was read from
+  rather than guessed at. Kept off the clinic's screen: it goes
+  to the browser console only, and only when
+  localStorage.getwellArboleafDebug is set to "1".
+*/
+function getwellLogArboleafResult(result){
+  try{
+    if(!window.console || !window.localStorage) return;
+    if(localStorage.getItem("getwellArboleafDebug") !== "1") return;
+
+    console.groupCollapsed(
+      "Arboleaf parser result (" + ((result && result.engine) || "none") + ")");
+
+    GETWELL_ARBOLEAF_METRICS.forEach(metric => {
+      const held = result && result.metrics && result.metrics[metric.name];
+      if(held === undefined) return;
+      const value = (held && typeof held === "object") ? held.value : held;
+      const unit  = (held && typeof held === "object" && held.unit) || metric.unit || "";
+      const note  = (result.flagged || []).indexOf(metric.name) >= 0 ? "  (check)" : "";
+      console.log(metric.name + "  ->  " + value + (unit ? " " + unit : "") + note);
+    });
+
+    (result && result.debug || []).forEach(row =>
+      console.log("   from label: " + JSON.stringify(row.label) + " -> " + row.metric));
+
+    console.groupEnd();
+  }catch(error){ /* logging must never break an upload */ }
+}
+
+
+if(typeof window !== "undefined"){
+  window.getwellParseArboleafLayout = getwellParseArboleafLayout;
+  window.getwellReadArboleafReport  = getwellReadArboleafReport;
+  window.getwellLogArboleafResult   = getwellLogArboleafResult;
+  window.GETWELL_ARBOLEAF_PARSER_VERSION = GETWELL_ARBOLEAF_PARSER_VERSION;
 }

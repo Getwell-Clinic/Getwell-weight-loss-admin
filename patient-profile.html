@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Patient Profile | Getwell</title>
-<link rel="stylesheet" href="styles.css?v=20260905-excel-import-3">
-<script src="app.js?v=20260905-excel-import-3"></script>
+<link rel="stylesheet" href="styles.css?v=20260906-arboleaf-pdf-1">
+<script src="app.js?v=20260906-arboleaf-pdf-1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <!--
   jsPDF builds the progress report. Tesseract is NOT loaded
@@ -117,7 +117,19 @@
       <div class="form-group">
         <label>Arboleaf PDF</label>
         <input id="vPdf" type="file" accept="application/pdf" onchange="handleArboleafFile(this)">
-        <div id="existingPdf" class="row-sub" style="margin-top:6px"></div>
+        <!--
+          REMOVE PDF IS NOT DELETE VISIT.
+
+          It sits here, beside the file it acts on, and it is
+          the only control in this modal that touches the
+          attached report. Deleting the visit itself is the
+          separate button in the footer.
+        -->
+        <div class="arb-pdf-line">
+          <div id="existingPdf" class="row-sub"></div>
+          <button type="button" id="removePdfButton" class="secondary arb-remove-pdf"
+                  style="display:none" onclick="removeArboleafPdf()">Remove PDF</button>
+        </div>
         <div id="pdfReadStatus" class="badge gray" style="margin-top:8px">No PDF selected.</div>
       </div>
 
@@ -580,11 +592,10 @@ function resetVisit(){
   vNotes.value="";
   vPdf.value="";
   vPhotos.value="";
-  existingPdf.textContent="";
+  renderArboleafPdfState(null);
   existingPhotos.textContent="";
-  pdfReadStatus.className="badge gray";
-  pdfReadStatus.textContent="No PDF selected.";
   arboleafLastText="";
+  arboleafParserEngine="";
   loadArboleafDraft(null);
   renderChargeBuilder();
   updateVisitTotal();
@@ -783,12 +794,11 @@ function openEditVisit(vid){
   vNotes.value=v.notes||"";
   vPdf.value="";
   vPhotos.value="";
-  existingPdf.textContent=v.pdfName?`Existing PDF: ${v.pdfName}`:"No PDF attached.";
+  renderArboleafPdfState(v);
   existingPhotos.textContent=(v.photos||[]).length?`${v.photos.length} existing photo(s). New uploads will be added.`:"No photos attached.";
-  pdfReadStatus.className="badge "+(v.arboleafText?"green":"gray");
-  pdfReadStatus.textContent=v.arboleafText?"Arboleaf PDF already parsed.":"No new PDF selected.";
 
   arboleafLastText=v.arboleafText||"";
+  arboleafParserEngine="";
   loadArboleafDraft(v);
 
   visitModalTitle.textContent="Edit Visit";
@@ -834,39 +844,67 @@ function normalizeMetricNumber(value){
 
 
 /*
-  Text-layer extraction. Items are grouped into lines by their
-  y coordinate so the parser sees "Protein (kg) 10.5 7.09~8.67"
-  as one row rather than as loose words.
+  Text-layer extraction.
+
+  Returns BOTH shapes the readers need: `words` carries every
+  text item with its box on the page, and `text` is the same
+  report rebuilt as lines. The boxes are what let the layout
+  parser tie a figure to its printed label, so they are the
+  preferred output; the lines are kept for the older
+  line-based reader.
 */
-async function extractPdfText(file){
+async function extractPdfContent(file){
   if(!window.pdfjsLib) throw new Error("PDF reader is not available.");
 
   const buffer=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
+  const words=[];
   const lines=[];
 
   for(let pageNo=1;pageNo<=pdf.numPages;pageNo++){
     const page=await pdf.getPage(pageNo);
+    const viewport=page.getViewport({scale:1});
     const content=await page.getTextContent();
     const rows=new Map();
 
     content.items.forEach(item=>{
       const text=String(item.str||"");
       if(!text.trim()) return;
-      /* transform[5] is the item's y position; rounding to 2pt
-         buckets keeps a row together without merging rows. */
-      const y=Math.round((item.transform&&item.transform[5]||0)/2);
-      if(!rows.has(y)) rows.set(y,[]);
-      rows.get(y).push({x:item.transform&&item.transform[4]||0,text});
+
+      const transform=item.transform||[];
+      const x=Number(transform[4])||0;
+      /* PDF space counts upwards from the bottom of the page;
+         the parsers work top-down, so y is flipped here once. */
+      const baseline=Number(transform[5])||0;
+      const height=Math.abs(Number(item.height)||Number(transform[3])||10);
+      const width=Number(item.width)||text.length*height*0.5;
+      const top=viewport.height-baseline-height;
+
+      words.push({
+        text, page:pageNo,
+        x0:x, y0:top, x1:x+width, y1:top+height,
+        conf:100
+      });
+
+      const key=Math.round(baseline/2);
+      if(!rows.has(key)) rows.set(key,[]);
+      rows.get(key).push({x,text});
     });
 
-    [...rows.keys()].sort((a,b)=>b-a).forEach(y=>{
-      const row=rows.get(y).sort((a,b)=>a.x-b.x).map(cell=>cell.text).join(" ");
+    [...rows.keys()].sort((a,b)=>b-a).forEach(key=>{
+      const row=rows.get(key).sort((a,b)=>a.x-b.x).map(cell=>cell.text).join(" ");
       if(row.trim()) lines.push(row.trim());
     });
   }
 
-  return lines.join("\n").trim();
+  return {words, text:lines.join("\n").trim()};
+}
+
+
+/* Kept under its old name and signature: other code and any
+   saved habit of calling it still work. */
+async function extractPdfText(file){
+  return (await extractPdfContent(file)).text;
 }
 
 
@@ -891,21 +929,185 @@ function getwellLoadOcrEngine(){
 
 
 /*
-  Render each page to a canvas and read it.
+  PREPARING AN ARBOLEAF PAGE FOR OCR
+  ---------------------------------
+  The Arboleaf report is drawn almost entirely in one blue.
+  The table rules, the coloured header bars and the bar-chart
+  bars are all the same blue as the large figures the report
+  prints its Fitness score in, so they cannot be removed by
+  colour alone — but they can be told apart by SHAPE.
 
-  The width is capped at 2200px: that is the resolution the
-  Arboleaf layout reads best at in testing, and going higher
-  costs time without recovering more figures.
+  A rule, a header bar or a chart bar is a long unbroken run of
+  colour, hundreds of pixels in one direction. The stroke of a
+  digit never is. So every coloured pixel whose horizontal or
+  vertical run of colour is longer than a fixed fraction of the
+  page is painted out as furniture, and every coloured pixel
+  that survives is text and is painted solid black.
+
+  This is what makes the report readable. With the rules left
+  in, the OCR engine's layout analysis swallows whole cells and
+  returns nothing for them — which is why figures printed in
+  the merged columns of the first table used to come back
+  missing, and why the values that did come back were the ones
+  most likely to be misread.
+
+  Nothing here changes a value. It changes only what the OCR
+  engine is shown.
 */
-async function extractPdfTextByOcr(file,onProgress){
+function getwellPrepareArboleafCanvas(canvas){
+  const context=canvas.getContext("2d");
+  const width=canvas.width, height=canvas.height;
+  if(!width||!height) return;
+
+  let image;
+  try{ image=context.getImageData(0,0,width,height); }
+  catch(error){ return; }   /* tainted canvas: leave it as it is */
+
+  const pixels=image.data;
+  const count=width*height;
+
+  const coloured=new Uint8Array(count);
+  for(let i=0;i<count;i++){
+    const r=pixels[i*4], g=pixels[i*4+1], b=pixels[i*4+2];
+    if((b-r)>40||(g-r)>40) coloured[i]=1;
+  }
+
+  /* Longest unbroken run of colour through each pixel. */
+  const run=new Uint16Array(count);
+  const cap=65535;
+  const limit=Math.max(40,Math.round(width*0.058));
+
+  for(let y=0;y<height;y++){
+    let length=0;
+    for(let x=0;x<width;x++){
+      const i=y*width+x;
+      length=coloured[i]?Math.min(cap,length+1):0;
+      run[i]=length;
+    }
+    for(let x=width-1,tail=0;x>=0;x--){
+      const i=y*width+x;
+      tail=coloured[i]?Math.min(cap,tail+1):0;
+      run[i]=Math.min(cap,run[i]+tail-(coloured[i]?1:0));
+    }
+  }
+
+  const furniture=new Uint8Array(count);
+  for(let i=0;i<count;i++) if(coloured[i]&&run[i]>limit) furniture[i]=1;
+
+  for(let x=0;x<width;x++){
+    let length=0;
+    for(let y=0;y<height;y++){
+      const i=y*width+x;
+      length=coloured[i]?Math.min(cap,length+1):0;
+      run[i]=length;
+    }
+    for(let y=height-1,tail=0;y>=0;y--){
+      const i=y*width+x;
+      tail=coloured[i]?Math.min(cap,tail+1):0;
+      const total=run[i]+tail-(coloured[i]?1:0);
+      if(coloured[i]&&total>limit) furniture[i]=1;
+    }
+  }
+
+  for(let i=0;i<count;i++){
+    const at=i*4;
+    let value;
+
+    if(furniture[i]){
+      value=255;                       /* rules, bars, fills */
+    }else if(coloured[i]){
+      value=0;                         /* coloured TEXT */
+    }else{
+      const grey=(pixels[at]*0.299+pixels[at+1]*0.587+pixels[at+2]*0.114);
+      value=Math.max(0,Math.min(255,(grey-60)*255/155));
+    }
+
+    pixels[at]=pixels[at+1]=pixels[at+2]=value;
+    pixels[at+3]=255;
+  }
+
+  context.putImageData(image,0,0);
+}
+
+
+/*
+  Word boxes from OCR, whichever shape this build of
+  tesseract.js reports them in.
+*/
+function getwellOcrWords(data,pageNo){
+  const words=[];
+
+  const push=(text,box,confidence)=>{
+    if(!text||!box) return;
+    const x0=Number(box.x0), y0=Number(box.y0), x1=Number(box.x1), y1=Number(box.y1);
+    if(!isFinite(x0)||!isFinite(y0)||!isFinite(x1)||!isFinite(y1)) return;
+    words.push({
+      text:String(text), page:pageNo,
+      x0, y0, x1, y1,
+      conf:isFinite(Number(confidence))?Number(confidence):100
+    });
+  };
+
+  if(data&&Array.isArray(data.words)&&data.words.length){
+    data.words.forEach(word=>push(word.text,word.bbox,word.confidence));
+    return words;
+  }
+
+  const walk=node=>{
+    if(!node) return;
+    if(Array.isArray(node)){ node.forEach(walk); return; }
+    if(node.words&&Array.isArray(node.words)){ node.words.forEach(word=>push(word.text,word.bbox,word.confidence)); }
+    ["blocks","paragraphs","lines"].forEach(key=>{ if(node[key]) walk(node[key]); });
+  };
+
+  if(data&&data.blocks){ walk(data.blocks); if(words.length) return words; }
+
+  /* Last resort: the TSV the engine can be asked for. */
+  if(data&&typeof data.tsv==="string"&&data.tsv){
+    data.tsv.split("\n").forEach(row=>{
+      const cell=row.split("\t");
+      if(cell.length<12||cell[0]==="level") return;
+      const text=String(cell[11]||"").trim();
+      if(!text) return;
+      const left=Number(cell[6]), top=Number(cell[7]);
+      const w=Number(cell[8]), h=Number(cell[9]);
+      if(!isFinite(left)||!isFinite(top)||!isFinite(w)||!isFinite(h)) return;
+      push(text,{x0:left,y0:top,x1:left+w,y1:top+h},Number(cell[10]));
+    });
+  }
+
+  return words;
+}
+
+
+/*
+  Render each page, clean it up and read it.
+
+  SPARSE_TEXT (page segmentation mode 11) is used deliberately.
+  The report is a grid of small isolated cells rather than
+  running prose, and the column-wise modes drop most of them.
+  The width is capped at 2200-2600px: that is the resolution
+  the Arboleaf layout reads best at in testing, and going
+  higher costs time without recovering more figures.
+*/
+async function extractPdfContentByOcr(file,onProgress){
   const Tesseract=await getwellLoadOcrEngine();
   const buffer=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
 
   const worker=await Tesseract.createWorker("eng");
-  await worker.setParameters({tessedit_pageseg_mode:"4"});
+
+  try{
+    await worker.setParameters({
+      tessedit_pageseg_mode:"11",
+      preserve_interword_spaces:"1"
+    });
+  }catch(error){
+    console.warn("OCR page-segmentation mode could not be set:",error);
+  }
 
   let text="";
+  const words=[];
 
   try{
     for(let pageNo=1;pageNo<=pdf.numPages;pageNo++){
@@ -920,7 +1122,7 @@ async function extractPdfTextByOcr(file,onProgress){
       canvas.width=Math.round(viewport.width);
       canvas.height=Math.round(viewport.height);
 
-      const context=canvas.getContext("2d");
+      const context=canvas.getContext("2d",{willReadFrequently:true});
 
       /*
         pdf.js draws onto a TRANSPARENT canvas. Handing that
@@ -933,9 +1135,19 @@ async function extractPdfTextByOcr(file,onProgress){
       context.fillRect(0,0,canvas.width,canvas.height);
 
       await page.render({canvasContext:context,viewport}).promise;
+      getwellPrepareArboleafCanvas(canvas);
 
-      const result=await worker.recognize(canvas);
-      text+=(result&&result.data&&result.data.text||"")+"\n";
+      let result;
+      try{
+        result=await worker.recognize(canvas,{},{text:true,blocks:true,tsv:true});
+      }catch(error){
+        /* Older builds reject the output argument. */
+        result=await worker.recognize(canvas);
+      }
+
+      const data=result&&result.data;
+      text+=((data&&data.text)||"")+"\n";
+      getwellOcrWords(data,pageNo).forEach(word=>words.push(word));
 
       canvas.width=0;
       canvas.height=0;
@@ -944,7 +1156,13 @@ async function extractPdfTextByOcr(file,onProgress){
     await worker.terminate();
   }
 
-  return text.trim();
+  return {words, text:text.trim()};
+}
+
+
+/* Kept under its old name and signature. */
+async function extractPdfTextByOcr(file,onProgress){
+  return (await extractPdfContentByOcr(file,onProgress)).text;
 }
 
 
@@ -1110,6 +1328,167 @@ function collectArboleafMetrics(){
 }
 
 
+/* =========================================================
+   THE ARBOLEAF PDF ON THIS VISIT
+   ---------------------------------------------------------
+   One place decides what the Arboleaf PDF row shows, so Add
+   Visit, Edit Visit, a fresh upload and a removal can never
+   disagree about whether a report is attached.
+========================================================= */
+
+function renderArboleafPdfState(visit){
+  const name = visit && (visit.pdfName || (visit.pdfFile && visit.pdfFile.name) || "");
+  const parsed = !!(visit && visit.arboleafText);
+  const removeButton = document.getElementById("removePdfButton");
+
+  if(name){
+    existingPdf.textContent = `Existing PDF: ${name}`;
+    if(removeButton) removeButton.style.display = "inline-flex";
+    pdfReadStatus.className = "badge " + (parsed ? "green" : "gray");
+    pdfReadStatus.textContent = parsed
+      ? "Arboleaf PDF already parsed."
+      : "Arboleaf PDF attached.";
+  }else{
+    existingPdf.textContent = "No Arboleaf PDF uploaded.";
+    if(removeButton) removeButton.style.display = "none";
+    pdfReadStatus.className = "badge gray";
+    pdfReadStatus.textContent = "No PDF selected.";
+  }
+}
+
+
+/*
+  REMOVE PDF
+  ----------
+  Removes the Arboleaf report attached to THIS visit, and
+  nothing else.
+
+  What it clears:  the visit's PDF file reference, its name and
+                   the raw text the reader recovered from it.
+  What it keeps:   the visit itself, its date, number, type,
+                   charges, payment, photos, notes — and the
+                   body composition measurements, which are
+                   clinical records in their own right and are
+                   not deleted because their source document
+                   was replaced.
+
+  The patient, every other visit, every appointment and every
+  other file are untouched. This shares no code with
+  deleteVisitRecord().
+*/
+async function removeArboleafPdf(){
+  const visit = editingVisitId ? (p.visits||[]).find(x => x && x.id === editingVisitId) : null;
+  const name = (vPdf.files && vPdf.files[0] && vPdf.files[0].name)
+            || (visit && (visit.pdfName || (visit.pdfFile && visit.pdfFile.name)))
+            || "This Arboleaf PDF";
+
+  const picked = !!(vPdf.files && vPdf.files[0]);
+
+  const ok = await getwellConfirmAction({
+    title: picked ? "Discard the selected PDF" : "Remove Arboleaf PDF",
+    message: picked
+      ? "Discard the PDF you just selected?"
+      : "Remove this Arboleaf PDF from this visit?",
+    note: picked
+      ? `${name} has not been saved yet, so nothing on the record changes. Any report already attached to this visit stays as it is.`
+      : `${name} will be removed. The patient and the visit record — including the body composition measurements already recorded — remain.`,
+    confirmLabel: picked ? "Discard" : "Remove PDF"
+  });
+  if(!ok) return;
+
+  /*
+    A file picked in THIS modal and not yet saved is discarded
+    first, on its own. Nothing about it has reached the record,
+    so removing it must not reach into the record either — the
+    report already stored on the visit stays exactly where it
+    was, and the row goes back to showing it.
+  */
+  const pending = !!(vPdf.files && vPdf.files[0]);
+  vPdf.value = "";
+
+  if(pending){
+    arboleafLastText = visit ? (visit.arboleafText || "") : "";
+    arboleafParserEngine = "";
+    renderArboleafPdfState(visit || null);
+    setArboleafNote(visit && visit.pdfName
+      ? "The newly selected PDF was discarded. The report already saved with this visit is unchanged."
+      : "No Arboleaf PDF attached. Upload one, or type the measurements in.");
+    getwellNotify("The selected PDF was discarded.", "info");
+    return;
+  }
+
+  arboleafLastText = "";
+  arboleafParserEngine = "";
+
+  if(!visit || !(visit.pdfName || visit.pdfFile)){
+    renderArboleafPdfState(visit || null);
+    setArboleafNote("No Arboleaf PDF attached. Upload one, or type the measurements in.");
+    getwellNotify("Arboleaf PDF removed.", "info");
+    return;
+  }
+
+  /*
+    An attachment already on the record. Only the PDF fields of
+    THIS ONE visit are cleared, in place — no visit is removed,
+    no visit is rebuilt from the form, and nothing the staff
+    member has typed into the open modal is written.
+  */
+  const driveId = visit.pdfFile && visit.pdfFile.driveId;
+
+  delete visit.pdfFile;
+  delete visit.pdfName;
+  delete visit.arboleafText;
+  delete visit.arboleafPdfName;
+  delete visit.arboleafPdfUrl;
+  delete visit.arboleafPdfStoragePath;
+  delete visit.arboleafParsedAt;
+  delete visit.arboleafParserVersion;
+
+  const saveResult = await upsertPatient(p);
+
+  getwellLogActivity(
+    "Update",
+    "Visit",
+    `${visit.id} · ${p.name||p.id}`,
+    "Arboleaf PDF removed from the visit (measurements kept)"
+  );
+
+  if(!getwellAnnounceSave(saveResult, "Arboleaf PDF removed.")){
+    /*
+      The write did not verify. Reload from the record and show
+      what is actually stored rather than what we hoped for —
+      and leave the file in Drive, because a file is only
+      deleted once the record that pointed at it has been
+      saved without it.
+    */
+    p = getPatient(p.id);
+    const reloaded = (p.visits||[]).find(x => x && x.id === editingVisitId) || null;
+    renderArboleafPdfState(reloaded);
+    refresh();
+    return;
+  }
+
+  /* Best effort, and only after the record no longer points at
+     it. A clinic on an older Apps Script deployment keeps the
+     file in Drive; the visit no longer references it either
+     way, and the message says so. */
+  if(driveId){
+    const removed = await getwellDeleteFile(driveId);
+    if(!removed.ok){
+      getwellNotify(
+        "The PDF was removed from the visit, but the copy in Google Drive could not be deleted. " +
+        (removed.error || ""),
+        "error"
+      );
+    }
+  }
+
+  renderArboleafPdfState(visit);
+  setArboleafNote("No Arboleaf PDF attached. Upload a new report, or edit the measurements below.");
+  refresh();
+}
+
+
 /*
   Upload handler. Tries the text layer first, falls back to
   OCR, and fills the grid with whatever was recovered without
@@ -1130,25 +1509,32 @@ async function handleArboleafFile(input){
      and refreshes what it can read. */
   const typed = collectArboleafMetrics();
 
+  /* The picked file is what this visit will carry once it is
+     saved, so the row says so and Remove PDF becomes available
+     straight away. */
+  existingPdf.textContent = `Selected: ${file.name}`;
+  const removeButton = document.getElementById("removePdfButton");
+  if(removeButton) removeButton.style.display = "inline-flex";
+
   setStatus("blue", "Reading Arboleaf PDF…");
 
-  let text = "";
+  let content = {words:[], text:""};
   let usedOcr = false;
 
   try{
-    text = await extractPdfText(file);
+    content = await extractPdfContent(file);
   }catch(error){
     console.error("Text-layer read failed:", error);
   }
 
   /* An Arboleaf export is a page image: no text comes back,
      so the pages are read with OCR instead. */
-  if(String(text).replace(/\s/g, "").length < 40){
+  if(String(content.text).replace(/\s/g, "").length < 40){
     usedOcr = true;
     setStatus("blue", "Scanned report — starting OCR (first run downloads the reader)…");
 
     try{
-      text = await extractPdfTextByOcr(file, message => setStatus("blue", message));
+      content = await extractPdfContentByOcr(file, message => setStatus("blue", message));
     }catch(error){
       console.error("OCR failed:", error);
       setStatus("red", "The report could not be read automatically. Enter the values below — the PDF is still saved with the visit.");
@@ -1157,9 +1543,11 @@ async function handleArboleafFile(input){
     }
   }
 
-  arboleafLastText = text;
+  arboleafLastText = content.text || "";
 
-  const parsed = getwellParseArboleafReport(text);
+  const parsed = getwellReadArboleafReport(content);
+  getwellLogArboleafResult(parsed);
+  arboleafParserEngine = parsed.engine || "";
   const found = Object.keys(parsed.metrics);
 
   arboleafDraft = Object.assign({}, typed, parsed.metrics);
@@ -1199,6 +1587,7 @@ async function handleArboleafFile(input){
 
 
 let arboleafLastText = "";
+let arboleafParserEngine = "";
 
 
 /*
@@ -2025,9 +2414,35 @@ async function saveVisit(){
     Clearing a box removes that measurement; the rest stay.
   */
   const arboleafMetrics=collectArboleafMetrics();
-  const arboleafText=arboleafLastText||old?.arboleafText||"";
+
+  /*
+    The raw text belongs to the PDF it was read from. When a
+    NEW report has been picked, the previous report's text is
+    not carried over — it would describe a document this visit
+    no longer holds. The measurements themselves come from the
+    grid above and are unaffected either way.
+  */
+  const arboleafText=vPdf.files?.[0]
+    ? (arboleafLastText||"")
+    : (arboleafLastText||old?.arboleafText||"");
+
+  /*
+    Backward-compatible bookkeeping about the attached report.
+    Older visits carry none of these fields and must keep
+    working, so every one of them is optional and every reader
+    falls back to pdfName / pdfFile as before.
+  */
+  let arboleafPdfUrl=old?.arboleafPdfUrl||(old?.pdfFile&&old.pdfFile.url)||"";
+  let arboleafPdfStoragePath=old?.arboleafPdfStoragePath||(old?.pdfFile&&old.pdfFile.driveId)||"";
+  let arboleafParsedAt=old?.arboleafParsedAt||"";
+  let arboleafParserVersion=old?.arboleafParserVersion||"";
 
   if(vPdf.files?.[0]){
+    /* A REPLACEMENT, not a second copy. The file this visit
+       used to point at is trashed after the new one is safely
+       stored, so Drive does not fill up with orphans. */
+    const replaced=(pdfFile&&pdfFile.driveId)||"";
+
     pdfName=vPdf.files[0].name;
 
     /*
@@ -2041,9 +2456,28 @@ async function saveVisit(){
         dataBase64:await fileToBase64(vPdf.files[0]),
         dataUrl:""
       });
+
+      arboleafPdfUrl=pdfFile.url||"";
+      arboleafPdfStoragePath=pdfFile.driveId||"";
+      arboleafParsedAt=new Date().toISOString();
+      arboleafParserVersion=arboleafParserEngine
+        ? `${window.GETWELL_ARBOLEAF_PARSER_VERSION||""}/${arboleafParserEngine}`
+        : (window.GETWELL_ARBOLEAF_PARSER_VERSION||"");
+
+      if(replaced && pdfFile.driveId && replaced!==pdfFile.driveId){
+        const removed=await getwellDeleteFile(replaced);
+        if(!removed.ok) console.warn("The replaced Arboleaf PDF is still in Drive:",removed.error);
+      }
     }catch(error){
       console.error("Unable to store the Arboleaf PDF:",error);
     }
+  }
+
+  /* Arboleaf fields are kept in step with each other: with no
+     PDF on the visit there is no PDF bookkeeping either. */
+  if(!pdfName && !pdfFile){
+    arboleafPdfUrl="";
+    arboleafPdfStoragePath="";
   }
 
   let photos=Array.isArray(old?.photos)?[...old.photos]:[];
@@ -2109,6 +2543,11 @@ async function saveVisit(){
     pdfName,
     pdfFile,
     arboleafText,
+    arboleafPdfName:pdfName,
+    arboleafPdfUrl,
+    arboleafPdfStoragePath,
+    arboleafParsedAt,
+    arboleafParserVersion,
     arboleafMetrics,
     photos,
     charges:editingCharges.map(c=>({...c})),

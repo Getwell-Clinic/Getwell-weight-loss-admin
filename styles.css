@@ -3468,6 +3468,33 @@ html[data-theme="dark"] .dash-empty-icon{
   color:var(--muted);
 }
 
+/* --- Arboleaf PDF row (Add / Edit Visit) --- */
+
+.arb-pdf-line{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  flex-wrap:wrap;
+  margin-top:6px;
+}
+
+.arb-pdf-line .row-sub{
+  min-width:0;
+  word-break:break-all;
+}
+
+/*
+  Deliberately quiet and deliberately not red: this removes an
+  attachment, it does not delete a visit. The destructive
+  button in this modal is the one in the footer.
+*/
+.arb-remove-pdf{
+  flex:0 0 auto;
+  padding:6px 12px;
+  font-size:10.5px;
+}
+
 /* --- Arboleaf review grid (Add / Edit Visit) --- */
 
 .arb-review{

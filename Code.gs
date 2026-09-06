@@ -67,7 +67,7 @@
   makes "the deployment is behind the code" a visible error
   rather than a silent one.
 */
-var GETWELL_BACKEND_VERSION = "2026-09-03.next-expected.1";
+var GETWELL_BACKEND_VERSION = "2026-09-06.arboleaf-pdf.1";
 
 var GETWELL_DRIVE_FOLDER = "Getwell Patient Files";
 
@@ -1275,6 +1275,44 @@ function storeDriveFile(payload){
 }
 
 
+/*
+  Remove ONE uploaded file.
+
+  Used by "Remove PDF" on a visit. Deliberately narrow:
+
+    * it moves a single file to the Drive trash, where it can
+      still be recovered by the account owner;
+    * it refuses any file that is not inside this app's own
+      upload folder, so an id typed or guessed by mistake
+      cannot reach anything else in the clinic's Drive;
+    * it never touches a spreadsheet. No patient, visit,
+      appointment, claim or measurement is read or changed by
+      this function.
+--------------------------------------------------------- */
+function removeDriveFile(fileId){
+  var id = toText(fileId);
+  if(!id) return {ok:false, error:"No file id was received."};
+
+  var file;
+  try{ file = DriveApp.getFileById(id); }
+  catch(error){ return {ok:false, error:"That file is not available: " + String(error)}; }
+
+  var folder = getDriveFolder();
+  var inFolder = false;
+  var parents = file.getParents();
+  while(parents.hasNext()){
+    if(parents.next().getId() === folder.getId()){ inFolder = true; break; }
+  }
+
+  if(!inFolder){
+    return {ok:false, error:"That file is not in the " + GETWELL_DRIVE_FOLDER + " folder, so it was left alone."};
+  }
+
+  file.setTrashed(true);
+  return {ok:true, trashed:id};
+}
+
+
 /* ---------------------------------------------------------
    HTTP ENTRY POINTS
 --------------------------------------------------------- */
@@ -1463,6 +1501,12 @@ function doPost(e){
 
     if(action === "uploadFile"){
       return jsonResponse(storeDriveFile(body.file));
+    }
+
+    /* Removes one uploaded file and nothing else. See
+       removeDriveFile() above. */
+    if(action === "deleteFile"){
+      return jsonResponse(removeDriveFile(body.fileId));
     }
 
     return jsonResponse({ok:false, version:GETWELL_BACKEND_VERSION, error:"Unknown action: " + action});
