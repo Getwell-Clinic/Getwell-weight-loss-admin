@@ -944,6 +944,11 @@ function getwellHasFutureAppointment(patient){
 function getwellCreateSuggestedAppointment(patient, visit){
   if(!patient || !visit || getwellHasFutureAppointment(patient)) return null;
 
+  /* No automatic follow-up is suggested for a patient staff
+     have marked Inactive. The visit itself still saves in full;
+     staff can still book an appointment for them by hand. */
+  if(!getwellPatientIsActive(patient)) return null;
+
   const f=getwellFollowUpSettings();
   const days=Math.min(f.maxDays,Math.max(f.minDays,f.defaultDays));
   const date=getwellSuggestedFollowUpDate(visit.dateKey,days);
@@ -1021,6 +1026,66 @@ function getwellAppointmentDuration(){
     30
   );
 
+}
+
+
+/* =========================================================
+   PATIENT STATUS  (staff-controlled, never automatic)
+   ---------------------------------------------------------
+   Active / Inactive is set BY CLINIC STAFF on the patient
+   record, in the existing `patient.status` field. Nothing in
+   this application writes that field on its own: no rule here
+   marks a patient Inactive because they stopped coming, and
+   none reactivates one because a follow-up date passed. It
+   changes when, and only when, somebody changes it in Edit
+   Patient.
+
+   What the status DOES control is whether the patient takes
+   part in the automated work: the Due / Due Soon / Overdue
+   calculation, the reminders built from it, and the follow-up
+   appointment suggested after a visit. A patient marked
+   Inactive drops out of all of it.
+
+   It controls NOTHING else. An Inactive patient still appears
+   in the Patient List, still opens, still shows every visit,
+   appointment, measurement and note, and can be edited and
+   set back to Active at any time — at which point they are
+   eligible for follow-up again immediately, because this is
+   read live on every calculation and nothing is cached.
+
+   ONLY "Inactive" EXCLUDES
+   ---------------------------------------------------------
+   The status list is configurable in Settings and ships with
+   Active, Inactive and Completed. Excluding everything that is
+   not the exact word "Active" would quietly drop Completed
+   patients — and any status the clinic invents later — out of
+   follow-up without anyone asking for that. So the test is
+   narrow and explicit: Inactive is out, everything else keeps
+   behaving exactly as it does today.
+
+   A record with no status at all counts as Active, which is
+   the same default the rest of the app has always used
+   (`patient.status || "Active"`). An older or imported row
+   that never had the field is therefore unaffected.
+========================================================= */
+
+function getwellPatientStatusKey(patient){
+  return String((patient && patient.status) || "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+
+/* Does this patient take part in automated follow-up? */
+function getwellPatientIsActive(patient){
+  if(!patient) return false;
+  return getwellPatientStatusKey(patient) !== "inactive";
+}
+
+
+/* Convenience for the lists that start from every patient. */
+function getwellActivePatients(patients){
+  return (patients || []).filter(getwellPatientIsActive);
 }
 
 
@@ -1201,6 +1266,23 @@ function getwellFollowUpRecords(){
   return (store().patients || [])
     .map(patient => {
       if(!patient) return null;
+
+      /*
+        A patient staff have marked Inactive takes no part in
+        automated follow-up. This is the single gate for the
+        whole feature: the Due / Due Soon / Overdue statuses,
+        the counters built from them, the dashboard list, the
+        appointments page table and the follow-up reminders all
+        read this one function, so an Inactive patient is out
+        of every one of them at the point of CALCULATION, not
+        hidden afterwards.
+
+        Their record is untouched — visits, appointments,
+        measurements and history all remain — and setting them
+        back to Active here makes them eligible again on the
+        very next render.
+      */
+      if(!getwellPatientIsActive(patient)) return null;
 
       const last = latestVisit(patient);
       const lastVisitDate = last?.dateKey || "";
@@ -2859,6 +2941,8 @@ function getwellManualSync(){
 
 window.getwellManualSync = getwellManualSync;
 window.getwellDeleteFile = getwellDeleteFile;
+window.getwellPatientIsActive = getwellPatientIsActive;
+window.getwellActivePatients = getwellActivePatients;
 window.getwellConfirmAction = getwellConfirmAction;
 
 
@@ -5512,6 +5596,12 @@ function getwellNotifications(){
     const horizon = getwellIsoDay(new Date(today.getTime() + 7 * 86400000));
 
     patients.forEach(patient => {
+      /* An automated reminder is automated work, so an Inactive
+         patient is left out of it. The appointment itself is
+         not touched and stays visible and editable in the
+         Appointment List and on the patient's own profile. */
+      if(!getwellPatientIsActive(patient)) return;
+
       (patient.appointments || []).forEach(appointment => {
         if(!appointment || !appointment.date) return;
         if(appointment.date < todayKey || appointment.date > horizon) return;
