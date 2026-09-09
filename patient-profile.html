@@ -2424,10 +2424,48 @@ function resizeImageFile(file,maxSize=1000,quality=.72){
 }
 
 async function saveVisit(){
-  if(!vDate.value||!vType.value.trim()){alert("Visit date and type are required.");return}
-  if(!updateVisitTotal()) return;
+  /* Prevent double-clicks / stale modal state from starting two saves. */
+  if(window.__getwellVisitSaveInFlight) return;
+  window.__getwellVisitSaveInFlight=true;
 
-  const old=editingVisitId?(p.visits||[]).find(x=>x.id===editingVisitId):null;
+  const saveButton=document.querySelector('#visitModal .modal-foot button.primary');
+  const originalSaveText=saveButton?.textContent||"Save Visit";
+
+  try{
+    if(!vDate.value||!vType.value.trim()){
+      alert("Visit date and type are required.");
+      return;
+    }
+
+    /*
+      Existing visits can contain an older Panel/Self-Pay split that no
+      longer exactly matches the current charge rows. Previously
+      updateVisitTotal() simply returned false here, with no error and
+      without closing the modal, so Edit Visit -> Save Visit looked like
+      the button did nothing. Reconcile the split to the current visit
+      total before the existing save path continues.
+    */
+    const currentTotal=editingCharges.reduce((sum,c)=>{
+      const value=Number.parseFloat(c?.price);
+      return sum+(Number.isFinite(value)&&value>0?value:0);
+    },0);
+
+    if(patientUsesPanel(p)){
+      let panel=Math.max(0,Number(vPanelEl.value)||0);
+      if(panel>currentTotal) panel=currentTotal;
+      vPanelEl.value=panel.toFixed(2);
+      vSelfEl.value=Math.max(0,currentTotal-panel).toFixed(2);
+    }
+
+    if(!updateVisitTotal()){
+      getwellNotify("Please check the Panel + Self-Pay amounts before saving this visit.","error");
+      return;
+    }
+
+    saveButton?.setAttribute("disabled","disabled");
+    if(saveButton) saveButton.textContent="Saving…";
+
+    const old=editingVisitId?(p.visits||[]).find(x=>x.id===editingVisitId):null;
   let pdfName=old?.pdfName||"";
   let pdfFile=old?.pdfFile||null;
 
@@ -2655,6 +2693,19 @@ async function saveVisit(){
         : `Visit ${v.id} saved to Google Sheets.`,
       "success"
     );
+  }
+  }catch(error){
+    console.error("[Getwell] Save Visit failed:",error);
+    getwellNotify(
+      "Save Visit failed: " + (error?.message || "Unexpected error. Check the browser console."),
+      "error"
+    );
+  }finally{
+    window.__getwellVisitSaveInFlight=false;
+    if(saveButton){
+      saveButton.removeAttribute("disabled");
+      saveButton.textContent=originalSaveText;
+    }
   }
 }
 
