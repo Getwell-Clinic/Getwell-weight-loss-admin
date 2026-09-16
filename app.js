@@ -2585,6 +2585,32 @@ function getwellFlushPendingRefresh(){
   and leaving a field is a focusout, so both are observable
   directly.
 */
+/*
+  UNIVERSAL MODAL SAFETY
+  ----------------------
+  Every modal in the app is now closed consistently by its own
+  close button, by Escape, or by clicking the backdrop. The
+  backdrop handler intentionally ignores clicks inside the dialog.
+  This is a safety net for every current and future modal so a
+  page cannot leave a visible overlay behind after an action.
+*/
+function getwellCloseModalSafety(){
+  document.addEventListener("keydown", event => {
+    if(event.key !== "Escape") return;
+    const open=document.querySelector(".modal-wrap.show, .admin-modal-wrap.show");
+    if(!open) return;
+    const close=open.querySelector(".modal-close, [data-modal-close]");
+    if(close) close.click();
+  }, true);
+
+  document.addEventListener("click", event => {
+    const open=event.target?.closest?.(".modal-wrap.show, .admin-modal-wrap.show");
+    if(!open || event.target !== open) return;
+    const close=open.querySelector(".modal-close, [data-modal-close]");
+    if(close) close.click();
+  }, true);
+}
+
 function getwellWatchUiBusyState(){
   if(!document.body) return;
 
@@ -6644,6 +6670,7 @@ document.addEventListener(
        Sheets is configured, because the cross-tab settings
        listener uses the same deferred-refresh mechanism. */
     getwellWatchUiBusyState();
+    getwellCloseModalSafety();
 
     initTheme();
     getwellApplyAppearance();

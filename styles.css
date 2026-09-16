@@ -3764,3 +3764,9 @@ html[data-theme="dark"] .next-expected-edit{background:#151E30;border-color:#3B4
 html[data-theme="dark"] .next-expected-edit:hover{background:#15365C;border-color:#2F65A0;color:#93C5FD}
 html[data-theme="dark"] .next-expected-flag.expected{color:#D1D9E4;background:#26344A;border-color:#3B4A61}
 html[data-theme="dark"] .next-expected-flag.confirmed{color:#86EFAC;background:#102A1A;border-color:#1F5133}
+
+/* 2026-09-16 — charge-row notes under a Recent Visits entry.
+   Inherits .row-sub (size, colour, dark mode); only adds wrapping. */
+.row-main{min-width:0}
+.visit-row-notes{white-space:normal;overflow-wrap:anywhere;word-break:normal}
+.visit-row-notes-label{font-weight:600}

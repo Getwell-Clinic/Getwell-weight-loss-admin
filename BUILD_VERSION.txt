@@ -1,2 +1,5 @@
 Getwell Weight Loss Admin - Safe Google Sheets Build
 2026-09-06.inactive-followup.1
+
+2026-09-09.modal-save-fix.1 - Modal actions close immediately after local persistence; background Sheets sync no longer blocks UI; universal modal Escape/backdrop safety added; cache-busting updated.
+2026-09-16.visit-notes.1 - Per-row Notes from Injection/Medication/Treatment/Additional charges are shown under each Recent Visits entry on Patient -> Overview. No data-model or backend change (notes were already stored in the Charges sheet Notes column).

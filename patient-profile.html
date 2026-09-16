@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Patient Profile | Getwell</title>
-<link rel="stylesheet" href="styles.css?v=20260906-inactive-followup-1">
-<script src="app.js?v=20260906-inactive-followup-1"></script>
+<link rel="stylesheet" href="styles.css?v=20260916-visit-notes-1">
+<script src="app.js?v=20260909-modal-save-fix-1"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <!--
   jsPDF builds the progress report. Tesseract is NOT loaded
@@ -53,7 +53,7 @@
 
 <div class="modal-wrap" id="editPatientModal">
   <div class="modal">
-    <div class="modal-head"><div><h2>Edit Patient</h2><p>Update patient information.</p></div><button class="modal-close" onclick="closeEditPatient()">×</button></div>
+    <div class="modal-head"><div><h2>Edit Patient</h2><p>Update patient information.</p></div><button type="button" class="modal-close" onclick="closeEditPatient()">×</button></div>
     <div class="modal-body">
 
       <div class="visit-section-title">Profile Photo</div>
@@ -96,13 +96,13 @@
         <div class="form-group"><label>Status</label><select id="editStatus"></select></div>
       </div>
     </div>
-    <div class="modal-foot"><button class="secondary" onclick="closeEditPatient()">Cancel</button><button class="secondary" onclick="deletePatientRecord()">Delete</button><button class="primary" onclick="savePatientChanges()">Save Changes</button></div>
+    <div class="modal-foot"><button type="button" class="secondary" onclick="closeEditPatient()">Cancel</button><button type="button" class="secondary" onclick="deletePatientRecord()">Delete</button><button type="button" class="primary" onclick="savePatientChanges()">Save Changes</button></div>
   </div>
 </div>
 
 <div class="modal-wrap" id="visitModal">
   <div class="modal" style="width:min(1000px,96vw)">
-    <div class="modal-head"><div><h2 id="visitModalTitle">Add Visit</h2><p id="visitModalSub"></p></div><button class="modal-close" onclick="closeVisit()">×</button></div>
+    <div class="modal-head"><div><h2 id="visitModalTitle">Add Visit</h2><p id="visitModalSub"></p></div><button type="button" class="modal-close" onclick="closeVisit()">×</button></div>
     <div class="modal-body">
       <div class="visit-section-title">Visit Information</div>
       <div class="form-grid">
@@ -179,13 +179,13 @@
       <div class="visit-section-title">Visit Notes</div>
       <textarea id="vNotes" class="form-group textarea"></textarea>
     </div>
-    <div class="modal-foot"><button class="secondary" onclick="closeVisit()">Cancel</button><button id="deleteVisitButton" class="secondary" onclick="deleteVisitRecord()" style="display:none">Delete</button><button class="primary" onclick="saveVisit()">Save Visit</button></div>
+    <div class="modal-foot"><button type="button" class="secondary" onclick="closeVisit()">Cancel</button><button type="button" id="deleteVisitButton" class="secondary" onclick="deleteVisitRecord()" style="display:none">Delete</button><button type="button" class="primary" onclick="saveVisit()">Save Visit</button></div>
   </div>
 </div>
 
 <div class="modal-wrap" id="claimModal">
   <div class="modal">
-    <div class="modal-head"><div><h2 id="claimModalTitle">Add Claim</h2><p>Claims can be split, backdated, future-dated or entered on a non-visit day.</p></div><button class="modal-close" onclick="closeClaimModal()">×</button></div>
+    <div class="modal-head"><div><h2 id="claimModalTitle">Add Claim</h2><p>Claims can be split, backdated, future-dated or entered on a non-visit day.</p></div><button type="button" class="modal-close" onclick="closeClaimModal()">×</button></div>
     <div class="modal-body">
       <div class="form-grid">
         <div class="form-group"><label>Claim Date</label><input id="claimDateInput" type="date"></div>
@@ -194,7 +194,7 @@
         <div class="form-group full"><label>Claim Notes</label><textarea id="claimNotesInput" placeholder="e.g. Split claim from previous visit, outstanding balance, insurer submission..."></textarea></div>
       </div>
     </div>
-    <div class="modal-foot"><button class="secondary" onclick="closeClaimModal()">Cancel</button><button id="deleteClaimButton" class="secondary" onclick="deleteClaimRecord()" style="display:none">Delete</button><button class="primary" onclick="saveClaim()">Save Claim</button></div>
+    <div class="modal-foot"><button type="button" class="secondary" onclick="closeClaimModal()">Cancel</button><button type="button" id="deleteClaimButton" class="secondary" onclick="deleteClaimRecord()" style="display:none">Delete</button><button type="button" class="primary" onclick="saveClaim()">Save Claim</button></div>
   </div>
 </div>
 
@@ -465,23 +465,39 @@ async function savePatientChanges(){
   p.panelSuspensionNote=patientUsesPanel(p)?editPanelSuspensionNote.value.trim():"";
   p.doctor=editDoctor.value||"";
   p.status=editStatus.value;
-  /* Awaited so the profile only re-renders once the record is
-     genuinely persisted, matching Add Patient. */
-  const saveResult=await upsertPatient(p);
+
+  /*
+    SAVE LOCALLY FIRST, THEN CLOSE THE MODAL.
+    saveStore() commits the new snapshot to localStorage before it
+    starts the Google Sheets request. Waiting on the network here
+    made a perfectly valid Save button appear to do nothing whenever
+    Sheets was slow/unreachable. The page can safely show the local
+    result immediately; the existing sync/outbox retries the remote
+    write in the background.
+  */
+  const savePromise=upsertPatient(p);
+  p=getPatient(p.id)||p;
+  closeEditPatient();
+  refresh();
+
+  let saveResult;
+  try{ saveResult=await savePromise; }
+  catch(error){
+    saveResult={ok:false,error:error?.message||"Unexpected error while saving."};
+  }
+
   getwellLogActivity(
     "Edit",
     "Patient",
     `${p.id} · ${p.name}`,
     `Status: ${p.status} · Panel: ${getPanelName(p)}`
   );
-  if(!getwellAnnounceSave(saveResult,"Patient saved to Google Sheets.")){
-    p=getPatient(p.id);
-    refresh();
-    return;
-  }
-  p=getPatient(p.id);
-  closeEditPatient();
-  refresh();
+  getwellAnnounceSave(
+    saveResult,
+    saveResult && saveResult.ok===false
+      ? ""
+      : "Patient saved to Google Sheets."
+  );
 }
 
 async function deletePatientRecord(){
@@ -505,53 +521,66 @@ async function deletePatientRecord(){
 async function deleteVisitRecord(){
   if(!editingVisitId) return;
   if(!await getwellConfirmDelete("Visit")) return;
-  const removedVisit=(p.visits||[]).find(v=>v&&v.id===editingVisitId);
-  p.visits=(p.visits||[]).filter(v=>v&&v.id!==editingVisitId);
+  const visitId=editingVisitId;
+  const removedVisit=(p.visits||[]).find(v=>v&&v.id===visitId);
+  p.visits=(p.visits||[]).filter(v=>v&&v.id!==visitId);
 
-  /* Removing a visit from the middle renumbers the rest, so
-     1,2,3,4 minus the second becomes 1,2,3. */
   getwellRenumberVisits(p);
-
   const newestWeighed=getwellPatientWeightSeries(p).slice(-1)[0];
   if(newestWeighed)p.currentWeight=newestWeighed.value;
 
-  const saveResult=await upsertPatient(p);
+  /*
+    The local snapshot is written synchronously by upsertPatient().
+    Close and redraw immediately; Google Sheets synchronization continues
+    in the background so a slow network cannot trap the user in the modal.
+  */
+  const savePromise=upsertPatient(p);
+  p=getPatient(p.id)||p;
+  closeVisit();
+  refresh();
+
+  let saveResult;
+  try{ saveResult=await savePromise; }
+  catch(error){ saveResult={ok:false,error:error?.message||"Unexpected error while deleting."}; }
+
   getwellLogActivity(
-    "Delete",
-    "Visit",
-    `${editingVisitId} · ${p.name||p.id}`,
+    "Delete","Visit",
+    `${visitId} · ${p.name||p.id}`,
     removedVisit?`Visit date ${removedVisit.dateKey||removedVisit.date||""}`:""
   );
-  if(!getwellAnnounceSave(saveResult,"Visit deleted from Google Sheets.")){
-    p=getPatient(p.id);
-    refresh();
-    return;
+  if(saveResult && saveResult.ok===false){
+    getwellNotify("Visit deleted on this device; Google Sheets will be retried in the background.","error");
+  }else{
+    getwellNotify("Visit deleted from Google Sheets.","success");
   }
-  closeVisit();
-  p=getPatient(p.id);
-  refresh();
 }
 
 async function deleteClaimRecord(){
   if(!editingClaimId) return;
   if(!await getwellConfirmDelete("Claim")) return;
-  const removedClaim=(p.claims||[]).find(c=>c&&c.id===editingClaimId);
-  p.claims=(p.claims||[]).filter(c=>c&&c.id!==editingClaimId);
-  const saveResult=await upsertPatient(p);
+  const claimId=editingClaimId;
+  const removedClaim=(p.claims||[]).find(c=>c&&c.id===claimId);
+  p.claims=(p.claims||[]).filter(c=>c&&c.id!==claimId);
+
+  const savePromise=upsertPatient(p);
+  p=getPatient(p.id)||p;
+  closeClaimModal();
+  refresh();
+
+  let saveResult;
+  try{ saveResult=await savePromise; }
+  catch(error){ saveResult={ok:false,error:error?.message||"Unexpected error while deleting."}; }
+
   getwellLogActivity(
-    "Delete",
-    "Claim",
-    `${editingClaimId} · ${p.name||p.id}`,
+    "Delete","Claim",
+    `${claimId} · ${p.name||p.id}`,
     removedClaim?`${money(removedClaim.amount||0)} · ${removedClaim.claimDate||""}`:""
   );
-  if(!getwellAnnounceSave(saveResult,"Claim deleted from Google Sheets.")){
-    p=getPatient(p.id);
-    refresh();
-    return;
+  if(saveResult && saveResult.ok===false){
+    getwellNotify("Claim deleted on this device; Google Sheets will be retried in the background.","error");
+  }else{
+    getwellNotify("Claim deleted from Google Sheets.","success");
   }
-  closeClaimModal();
-  p=getPatient(p.id);
-  refresh();
 }
 
 function showSection(s,b){
@@ -559,6 +588,49 @@ function showSection(s,b){
   document.getElementById("sec-"+s).style.display="block";
   document.querySelectorAll(".patient-tabs button").forEach(x=>x.classList.remove("active"));
   if(b)b.classList.add("active");
+}
+
+/*
+  CHARGE-ROW NOTES IN RECENT VISITS
+
+  Every Injection / Medication / Treatment / Additional row
+  already stores its own `notes` (visit.charges[i].notes),
+  which is written to the Notes column of the Charges sheet
+  and read back from it. These helpers only DISPLAY them:
+  category order Injection -> Medication -> Treatment ->
+  Additional, row order inside a category as stored, blanks
+  and exact repeats skipped. A visit with no row notes
+  returns "" so its Recent Visits row is unchanged.
+*/
+const VISIT_NOTE_CATEGORY_ORDER=["Injection","Medication","Treatment","Additional"];
+
+function getVisitChargeNotes(v){
+  if(!v) return [];
+  const charges=getChargesForVisit(v);
+  const seen=new Set();
+  const notes=[];
+  VISIT_NOTE_CATEGORY_ORDER.forEach(category=>{
+    charges
+      .filter(c=>c&&c.category===category)
+      .forEach(c=>{
+        const raw=c.notes;
+        if(raw===null||raw===undefined) return;
+        const text=String(raw).replace(/\s+/g," ").trim();
+        if(!text) return;
+        const lower=text.toLowerCase();
+        if(lower==="undefined"||lower==="null") return;
+        if(seen.has(text)) return;
+        seen.add(text);
+        notes.push(text);
+      });
+  });
+  return notes;
+}
+
+function visitChargeNotesLine(v){
+  const notes=getVisitChargeNotes(v);
+  if(!notes.length) return "";
+  return `<div class="row-sub visit-row-notes"><span class="visit-row-notes-label">Notes:</span> ${notes.map(escapeHtml).join(" · ")}</div>`;
 }
 
 function openAddVisit(){
@@ -2395,10 +2467,48 @@ function resizeImageFile(file,maxSize=1000,quality=.72){
 }
 
 async function saveVisit(){
-  if(!vDate.value||!vType.value.trim()){alert("Visit date and type are required.");return}
-  if(!updateVisitTotal()) return;
+  /* Prevent double-clicks / stale modal state from starting two saves. */
+  if(window.__getwellVisitSaveInFlight) return;
+  window.__getwellVisitSaveInFlight=true;
 
-  const old=editingVisitId?(p.visits||[]).find(x=>x.id===editingVisitId):null;
+  const saveButton=document.querySelector('#visitModal .modal-foot button.primary');
+  const originalSaveText=saveButton?.textContent||"Save Visit";
+
+  try{
+    if(!vDate.value||!vType.value.trim()){
+      alert("Visit date and type are required.");
+      return;
+    }
+
+    /*
+      Existing visits can contain an older Panel/Self-Pay split that no
+      longer exactly matches the current charge rows. Previously
+      updateVisitTotal() simply returned false here, with no error and
+      without closing the modal, so Edit Visit -> Save Visit looked like
+      the button did nothing. Reconcile the split to the current visit
+      total before the existing save path continues.
+    */
+    const currentTotal=editingCharges.reduce((sum,c)=>{
+      const value=Number.parseFloat(c?.price);
+      return sum+(Number.isFinite(value)&&value>0?value:0);
+    },0);
+
+    if(patientUsesPanel(p)){
+      let panel=Math.max(0,Number(vPanelEl.value)||0);
+      if(panel>currentTotal) panel=currentTotal;
+      vPanelEl.value=panel.toFixed(2);
+      vSelfEl.value=Math.max(0,currentTotal-panel).toFixed(2);
+    }
+
+    if(!updateVisitTotal()){
+      getwellNotify("Please check the Panel + Self-Pay amounts before saving this visit.","error");
+      return;
+    }
+
+    saveButton?.setAttribute("disabled","disabled");
+    if(saveButton) saveButton.textContent="Saving…";
+
+    const old=editingVisitId?(p.visits||[]).find(x=>x.id===editingVisitId):null;
   let pdfName=old?.pdfName||"";
   let pdfFile=old?.pdfFile||null;
 
@@ -2589,21 +2699,22 @@ async function saveVisit(){
   }
 
   /*
-    ROOT CAUSE OF "THE APP SAID THE VISIT WAS SAVED BUT THE
-    VISITS SHEET IS EMPTY"
-    -------------------------------------------------------
-    upsertPatient() returns the outcome of the Google Sheets
-    write. This function used to throw that value away and
-    show the green "Visit saved successfully." toast no matter
-    what came back -- so a visit that never reached the sheet
-    was indistinguishable from one that did.
-
-    The result is now inspected. The success message appears
-    only when Code.gs has read the Visit ID back off a row in
-    the Visits sheet, and the modal stays open on failure so
-    the work is not lost behind a closed dialog.
+    saveStore() commits the snapshot to localStorage before it starts
+    the remote request. Start that request, then close and redraw
+    immediately. A slow/unavailable Google Sheets connection must
+    never make the Save button feel broken or leave the modal hanging.
+    The existing outbox/background sync retries failed remote writes.
   */
-  const saveResult = await upsertPatient(p);
+  const savePromise = upsertPatient(p);
+  p=getPatient(p.id)||p;
+  closeVisit();
+  refresh();
+
+  let saveResult;
+  try{ saveResult=await savePromise; }
+  catch(error){
+    saveResult={ok:false,error:error?.message||"Unexpected error while saving."};
+  }
 
   getwellLogActivity(
     old?"Edit":"Add",
@@ -2614,26 +2725,31 @@ async function saveVisit(){
   );
 
   if(saveResult && saveResult.ok === false){
-    /* saveStore() has already shown the detailed reason. */
     getwellNotify(
-      `Visit ${v.id} was NOT stored in the Visits sheet. It is kept on this device and will be retried.`,
+      `Visit ${v.id} is saved on this device; Google Sheets will be retried in the background.`,
       "error"
     );
-    p=getPatient(p.id);
-    refresh();
-    return;
+  }else{
+    getwellNotify(
+      suggestedAppointment
+        ? `Visit ${v.id} saved to Google Sheets. Suggested follow-up: ${suggestedAppointment.date}`
+        : `Visit ${v.id} saved to Google Sheets.`,
+      "success"
+    );
   }
-
-  getwellNotify(
-    suggestedAppointment
-      ? `Visit ${v.id} saved to Google Sheets. Suggested follow-up: ${suggestedAppointment.date}`
-      : `Visit ${v.id} saved to Google Sheets.`,
-    "success"
-  );
-
-  p=getPatient(p.id);
-  closeVisit();
-  refresh();
+  }catch(error){
+    console.error("[Getwell] Save Visit failed:",error);
+    getwellNotify(
+      "Save Visit failed: " + (error?.message || "Unexpected error. Check the browser console."),
+      "error"
+    );
+  }finally{
+    window.__getwellVisitSaveInFlight=false;
+    if(saveButton){
+      saveButton.removeAttribute("disabled");
+      saveButton.textContent=originalSaveText;
+    }
+  }
 }
 
 function openClaimModal(claimId=null){
@@ -2670,21 +2786,25 @@ async function saveClaim(){
   if(old)arr[arr.indexOf(old)]=obj;
   else arr.push(obj);
 
-  const saveResult=await upsertPatient(p);
+  const savePromise=upsertPatient(p);
+  p=getPatient(p.id)||p;
+  closeClaimModal();
+  refresh();
+
+  let saveResult;
+  try{ saveResult=await savePromise; }
+  catch(error){ saveResult={ok:false,error:error?.message||"Unexpected error while saving."}; }
+
   getwellLogActivity(
-    old?"Edit":"Add",
-    "Claim",
+    old?"Edit":"Add","Claim",
     `${obj.id} · ${p.name||p.id}`,
     `${money(obj.amount)} · ${obj.claimDate||""}`
   );
-  if(!getwellAnnounceSave(saveResult,`Claim ${obj.id} saved to Google Sheets.`)){
-    p=getPatient(p.id);
-    refresh();
-    return;
+  if(saveResult && saveResult.ok===false){
+    getwellNotify("Claim saved on this device; Google Sheets will be retried in the background.","error");
+  }else{
+    getwellNotify(`Claim ${obj.id} saved to Google Sheets.`,"success");
   }
-  p=getPatient(p.id);
-  closeClaimModal();
-  refresh();
 }
 
 function signedBalanceLabel(balance){
@@ -2745,7 +2865,7 @@ function refresh(){
     return `
     <div class="row"><div class="avatar-small">${getwellPatientAvatar(p)}</div>
       <div class="row-main"><div class="row-title">${escapeHtml(row.label)} · ${escapeHtml(v.type||"")}</div>
-      <div class="row-sub">${escapeHtml(getwellShortVisitDate(row.dateKey,true))} · ${money(visitTotal(v))}${row.hasArboleaf?" · Arboleaf":(v.pdfName?" · Arboleaf PDF":"")}</div></div>
+      <div class="row-sub">${escapeHtml(getwellShortVisitDate(row.dateKey,true))} · ${money(visitTotal(v))}${row.hasArboleaf?" · Arboleaf":(v.pdfName?" · Arboleaf PDF":"")}</div>${visitChargeNotesLine(v)}</div>
       <button class="secondary" style="padding:7px 9px" onclick="openEditVisit('${escapeHtml(v.id)}')">Edit →</button>
     </div>`;
   }).join("")||`<div class="notif-empty">No visits.</div>`;
