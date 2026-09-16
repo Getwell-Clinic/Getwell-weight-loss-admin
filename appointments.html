@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Appointments | Getwell</title>
-<link rel="stylesheet" href="styles.css?v=20260909-modal-save-fix-1">
-<script src="app.js?v=20260909-modal-save-fix-1"></script>
+<link rel="stylesheet" href="styles.css?v=20260906-inactive-followup-1">
+<script src="app.js?v=20260906-inactive-followup-1"></script>
 <style>
 #appointmentModal.modal-wrap{display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;background:rgba(17,24,39,.48);pointer-events:none;}
 #appointmentModal.modal-wrap.show{display:flex!important;pointer-events:auto!important;}
@@ -523,32 +523,25 @@ function openEditAppointment(patientId, appointmentId){
 
 async function deleteAppointment(){
   if(!editingAppointmentId) return;
-  const appointmentId=editingAppointmentId;
   const patientId=document.getElementById("appointmentPatient")?.value||"";
   const patient=getPatient(patientId);
   if(!patient) return;
   if(!await getwellConfirmDelete("Appointment")) return;
-  const removed=(patient.appointments||[]).find(a=>a&&a.id===appointmentId);
-  patient.appointments=(patient.appointments||[]).filter(a=>a&&a.id!==appointmentId);
-
-  const savePromise=upsertPatient(patient);
-  closeAppointmentModal();
-  renderAppointments();
-
-  let saveResult;
-  try{ saveResult=await savePromise; }
-  catch(error){ saveResult={ok:false,error:error?.message||"Unexpected error while deleting."}; }
-
+  const removed=(patient.appointments||[]).find(a=>a&&a.id===editingAppointmentId);
+  patient.appointments=(patient.appointments||[]).filter(a=>a&&a.id!==editingAppointmentId);
+  const saveResult=await upsertPatient(patient);
   getwellLogActivity(
-    "Delete","Appointment",
-    `${appointmentId} · ${patient.name||patient.id}`,
+    "Delete",
+    "Appointment",
+    `${editingAppointmentId} · ${patient.name||patient.id}`,
     removed?`${removed.date||""} ${removed.time||""} ${removed.type||""}`.trim():""
   );
-  if(saveResult && saveResult.ok===false){
-    getwellNotify("Appointment deleted on this device; Google Sheets will be retried in the background.","error");
-  }else{
-    getwellNotify("Appointment deleted from Google Sheets.","success");
+  if(!getwellAnnounceSave(saveResult,"Appointment deleted from Google Sheets.")){
+    renderAppointments();
+    return;
   }
+  closeAppointmentModal();
+  renderAppointments();
 }
 
 function closeAppointmentModal(){
@@ -583,34 +576,24 @@ async function saveAppointment(){
   const index=patient.appointments.findIndex(a=>a.id===appointment.id);
   const wasEditing=!!editingAppointmentId;
   if(index>=0) patient.appointments[index]=appointment; else patient.appointments.push(appointment);
-  const savePromise=upsertPatient(patient);
-  closeAppointmentModal();
-  renderAppointments(document.getElementById("appointmentSearch")?.value||"");
-
-  let saveResult;
-  try{ saveResult=await savePromise; }
-  catch(error){ saveResult={ok:false,error:error?.message||"Unexpected error while saving."}; }
+  const saveResult=await upsertPatient(patient);
   getwellLogActivity(
     wasEditing?"Edit":"Add",
     "Appointment",
     `${appointment.id} · ${patient.name||patient.id}`,
     `${appointment.date||""} ${appointment.time||""} ${appointment.type||""} · ${appointment.status||""}`.trim()
   );
-  if(saveResult && saveResult.ok===false){
-    getwellNotify(
-      wasEditing
-        ? `Appointment ${appointment.id} updated on this device; Google Sheets will be retried in the background.`
-        : `Appointment ${appointment.id} saved on this device; Google Sheets will be retried in the background.`,
-      "error"
-    );
-  }else{
-    getwellNotify(
+  if(!getwellAnnounceSave(
+      saveResult,
       wasEditing
         ? `Appointment ${appointment.id} updated in Google Sheets.`
-        : `Appointment ${appointment.id} saved to Google Sheets.`,
-      "success"
-    );
+        : `Appointment ${appointment.id} saved to Google Sheets.`
+    )){
+    renderAppointments(document.getElementById("appointmentSearch")?.value||"");
+    return;
   }
+  closeAppointmentModal();
+  renderAppointments(document.getElementById("appointmentSearch")?.value||"");
 }
 
 function renderAppointments(q=""){
