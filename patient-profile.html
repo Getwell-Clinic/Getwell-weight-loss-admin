@@ -39,10 +39,11 @@
       </div>
 
       <p class="photo-hint">
-        The photo is uploaded to the existing <strong>Getwell Patient Files</strong>
-        folder in Google Drive. Only the Drive file ID and link are saved with the
-        patient record &mdash; the image itself is never stored in Google Sheets.
-        If Drive is unreachable the photo is kept on this device and clearly badged.
+        This is the patient's <strong>Photo 1</strong>. It is stored in the patient's
+        folder under <strong>GETWELL WEIGHT LOSS PATIENT FILES &rarr; PATIENTS</strong>.
+        Only the Drive file ID and link are saved with the patient record &mdash; the
+        image itself is never stored in Google Sheets. If Drive is unreachable the
+        photo is kept on this device and clearly badged.
       </p>
     </div>
     <div class="modal-foot">
@@ -71,10 +72,11 @@
       </div>
 
       <p class="photo-hint">
-        The photo is uploaded to the existing <strong>Getwell Patient Files</strong>
-        folder in Google Drive. Only the Drive file ID and link are saved with the
-        patient record &mdash; the image itself is never stored in Google Sheets.
-        If Drive is unreachable the photo is kept on this device and clearly badged.
+        This is the patient's <strong>Photo 1</strong>. It is stored in the patient's
+        folder under <strong>GETWELL WEIGHT LOSS PATIENT FILES &rarr; PATIENTS</strong>.
+        Only the Drive file ID and link are saved with the patient record &mdash; the
+        image itself is never stored in Google Sheets. If Drive is unreachable the
+        photo is kept on this device and clearly badged.
       </p>
 
       <div class="visit-section-title">Patient Details</div>
@@ -171,7 +173,7 @@
 
       <div class="visit-section-title">Photos</div>
       <div class="form-group">
-        <label>Upload visit / before-after photos</label>
+        <label>Upload patient Photo 2 / before-after photo</label>
         <input id="vPhotos" type="file" accept="image/*" multiple>
         <div id="existingPhotos" class="row-sub" style="margin-top:6px"></div>
       </div>
@@ -1432,8 +1434,9 @@ function renderArboleafPdfState(visit){
 /*
   REMOVE PDF
   ----------
-  Removes the Arboleaf report attached to THIS visit, and
-  nothing else.
+  Removes the current patient-level Arboleaf report. Because the
+  new Drive model keeps one PDF per patient, the shared file
+  reference is cleared from visits that point to that file.
 
   What it clears:  the visit's PDF file reference, its name and
                    the raw text the reader recovered from it.
@@ -1444,9 +1447,8 @@ function renderArboleafPdfState(visit){
                    not deleted because their source document
                    was replaced.
 
-  The patient, every other visit, every appointment and every
-  other file are untouched. This shares no code with
-  deleteVisitRecord().
+  The patient, appointments, claims and measurements are not
+  deleted. This shares no code with deleteVisitRecord().
 */
 async function removeArboleafPdf(){
   const visit = editingVisitId ? (p.visits||[]).find(x => x && x.id === editingVisitId) : null;
@@ -1507,14 +1509,32 @@ async function removeArboleafPdf(){
   */
   const driveId = visit.pdfFile && visit.pdfFile.driveId;
 
-  delete visit.pdfFile;
-  delete visit.pdfName;
-  delete visit.arboleafText;
-  delete visit.arboleafPdfName;
-  delete visit.arboleafPdfUrl;
-  delete visit.arboleafPdfStoragePath;
-  delete visit.arboleafParsedAt;
-  delete visit.arboleafParserVersion;
+  /*
+    Arboleaf is stored once per patient. Removing it from one visit
+    therefore clears the shared patient-level PDF reference from
+    every visit that points at the same Drive file. Their parsed
+    measurements/text remain untouched.
+  */
+  (p.visits||[]).forEach(existingVisit => {
+    if(!existingVisit) return;
+
+    const sameFile = existingVisit === visit ||
+      (driveId && existingVisit.pdfFile && existingVisit.pdfFile.driveId === driveId);
+
+    if(!sameFile) return;
+
+    delete existingVisit.pdfFile;
+    delete existingVisit.pdfName;
+    delete existingVisit.arboleafPdfName;
+    delete existingVisit.arboleafPdfUrl;
+    delete existingVisit.arboleafPdfStoragePath;
+    delete existingVisit.arboleafParsedAt;
+    delete existingVisit.arboleafParserVersion;
+
+    if(existingVisit === visit){
+      delete existingVisit.arboleafText;
+    }
+  });
 
   const saveResult = await upsertPatient(p);
 
@@ -2422,7 +2442,9 @@ async function storeAttachment(attachment){
     mimeType: attachment.mimeType,
     dataBase64: attachment.dataBase64,
     patientId: p.id,
-    visitId: editingVisitId || ""
+    visitId: editingVisitId || "",
+    patientName: p.name || "",
+    kind: attachment.kind || ""
   });
 
   if(uploaded.ok && uploaded.file){
@@ -2532,7 +2554,7 @@ async function saveVisit(){
     no longer holds. The measurements themselves come from the
     grid above and are unaffected either way.
   */
-  const arboleafText=vPdf.files?.[0]
+  let arboleafText=vPdf.files?.[0]
     ? (arboleafLastText||"")
     : (arboleafLastText||old?.arboleafText||"");
 
@@ -2564,27 +2586,80 @@ async function saveVisit(){
         name:vPdf.files[0].name,
         mimeType:"application/pdf",
         dataBase64:await fileToBase64(vPdf.files[0]),
-        dataUrl:""
+        dataUrl:"",
+        kind:"arboleaf"
       });
 
-      arboleafPdfUrl=pdfFile.url||"";
-      arboleafPdfStoragePath=pdfFile.driveId||"";
-      arboleafParsedAt=new Date().toISOString();
-      arboleafParserVersion=arboleafParserEngine
-        ? `${window.GETWELL_ARBOLEAF_PARSER_VERSION||""}/${arboleafParserEngine}`
-        : (window.GETWELL_ARBOLEAF_PARSER_VERSION||"");
+      if(pdfFile.storage==="drive" && pdfFile.driveId){
+        arboleafPdfUrl=pdfFile.url||"";
+        arboleafPdfStoragePath=pdfFile.driveId||"";
+        arboleafParsedAt=new Date().toISOString();
+        arboleafParserVersion=arboleafParserEngine
+          ? `${window.GETWELL_ARBOLEAF_PARSER_VERSION||""}/${arboleafParserEngine}`
+          : (window.GETWELL_ARBOLEAF_PARSER_VERSION||"");
 
-      if(replaced && pdfFile.driveId && replaced!==pdfFile.driveId){
-        const removed=await getwellDeleteFile(replaced);
-        if(!removed.ok) console.warn("The replaced Arboleaf PDF is still in Drive:",removed.error);
+        /*
+          Arboleaf is one current patient-level Drive file. Keep the
+          PDF reference on any existing visit that already carried an
+          Arboleaf document, while preserving each visit's own parsed
+          text and measurements.
+        */
+        (p.visits||[]).forEach(existingVisit => {
+          if(!existingVisit) return;
+
+          const hadArboleafFile=!!(
+            existingVisit.pdfFile?.driveId ||
+            existingVisit.pdfFile?.url ||
+            existingVisit.pdfName ||
+            existingVisit.arboleafPdfUrl ||
+            existingVisit.arboleafPdfStoragePath
+          );
+
+          if(!hadArboleafFile) return;
+
+          existingVisit.pdfFile={
+            name:pdfName,
+            driveId:pdfFile.driveId,
+            url:pdfFile.url||"",
+            storage:"drive"
+          };
+          existingVisit.pdfName=pdfName;
+          existingVisit.arboleafPdfName=pdfName;
+          existingVisit.arboleafPdfUrl=pdfFile.url||"";
+          existingVisit.arboleafPdfStoragePath=pdfFile.driveId;
+        });
+
+        if(replaced && replaced!==pdfFile.driveId){
+          const removed=await getwellDeleteFile(replaced);
+          if(!removed.ok) console.warn("The replaced Arboleaf PDF is still in Drive:",removed.error);
+        }
+      }else{
+        /*
+          Drive upload failed, so keep the previous permanent PDF and
+          its parsed text/metadata. The selected PDF can still be kept
+          in the browser-local fallback by the existing attachment path.
+        */
+        pdfName=old?.pdfName||"";
+        pdfFile=old?.pdfFile||null;
+        arboleafText=old?.arboleafText||"";
+        arboleafPdfUrl=old?.arboleafPdfUrl||(old?.pdfFile&&old.pdfFile.url)||"";
+        arboleafPdfStoragePath=old?.arboleafPdfStoragePath||(old?.pdfFile&&old.pdfFile.driveId)||"";
+        arboleafParsedAt=old?.arboleafParsedAt||"";
+        arboleafParserVersion=old?.arboleafParserVersion||"";
+
+        getwellNotify(
+          "The new Arboleaf PDF could not be saved to Google Drive. The previously saved PDF was kept.",
+          "error"
+        );
       }
     }catch(error){
       console.error("Unable to store the Arboleaf PDF:",error);
     }
   }
 
-  /* Arboleaf fields are kept in step with each other: with no
-     PDF on the visit there is no PDF bookkeeping either. */
+  /* Arboleaf fields are kept in step with the current patient-level
+     PDF reference: with no PDF on the visit there is no PDF
+     bookkeeping either. */
   if(!pdfName && !pdfFile){
     arboleafPdfUrl="";
     arboleafPdfStoragePath="";
@@ -2594,21 +2669,56 @@ async function saveVisit(){
   let localOnlyCount=0;
 
   if(vPhotos.files?.length){
-    const newPhotos=[];
-    for(const file of Array.from(vPhotos.files).slice(0,5)){
-      try{
-        const resized=await resizeImageFile(file);
-        const stored=await storeAttachment({
-          name:resized.name,
-          mimeType:"image/jpeg",
-          dataBase64:dataUrlToBase64(resized.data),
-          dataUrl:resized.data
+    /*
+      The existing visit/before-after input is the patient's single
+      Photo 2 slot. Its first selected image replaces the current
+      Photo 2. The frontend input remains unchanged; the storage
+      model is now exactly two patient photos:
+        Photo 1 = Profile Photo
+        Photo 2 = visit/before-after photo
+    */
+    const file=Array.from(vPhotos.files)[0];
+
+    try{
+      const resized=await resizeImageFile(file);
+      const stored=await storeAttachment({
+        name:resized.name,
+        mimeType:"image/jpeg",
+        dataBase64:dataUrlToBase64(resized.data),
+        dataUrl:resized.data,
+        kind:"patient-photo-2"
+      });
+
+      if(stored.storage==="local"){
+        localOnlyCount++;
+        /*
+          Keep the existing Drive-backed Photo 2 when Drive is
+          unavailable. The local fallback must not delete the
+          current permanent photo from the Sheets record.
+        */
+      }else{
+        /*
+          Converge the browser record to ONE Photo 2 reference so the
+          Files sheet does not keep old visit-photo rows after a
+          successful replacement.
+        */
+        (p.visits||[]).forEach(existingVisit => {
+          if(existingVisit) existingVisit.photos=[];
         });
-        if(stored.storage==="local") localOnlyCount++;
-        newPhotos.push(stored);
-      }catch(e){ console.error(e); }
+
+        photos=[stored];
+
+        if(vPhotos.files.length>1){
+          getwellNotify(
+            "Only the first selected image is stored as the patient's Photo 2. Upload it again to replace Photo 2.",
+            "info"
+          );
+        }
+      }
+
+    }catch(e){
+      console.error(e);
     }
-    photos=photos.concat(newPhotos);
   }
 
   if(localOnlyCount){

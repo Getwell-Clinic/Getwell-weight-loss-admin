@@ -19,6 +19,134 @@ Google Apps Script web app.
 | `styles.css` | All styling |
 | `Code.gs` | **Google Apps Script backend** (see below) |
 
+
+## 2026-09-19 — New Google Drive patient storage
+
+This update reorganises **only the Google Drive storage layer** for patient photos and Arboleaf PDFs. The existing application UI, Google Sheets model, appointments, visits, claims, dashboard, reports and Arboleaf parsing workflow remain in place.
+
+### New Drive structure
+
+The backend creates this tree automatically:
+
+```text
+GETWELL WEIGHT LOSS PATIENT FILES
+└── PATIENTS
+    ├── GW0001 - Patient Name
+    │   ├── Photo 1.jpg
+    │   ├── Photo 2.jpg
+    │   └── Arboleaf.pdf
+    ├── GW0002 - Patient Name
+    │   ├── Photo 1.jpg
+    │   ├── Photo 2.jpg
+    │   └── Arboleaf.pdf
+    └── ...
+```
+
+There are deliberately no visit folders, photo folders, upload folders, archive folders, unassigned folders or legacy-folder compatibility paths.
+
+`GETWELL_DRIVE_ROOT_ID` is the Script Property source of truth for the new root. `GETWELL_DRIVE_PATIENTS_ID` stores the `PATIENTS` folder ID. Uploads do not repeatedly search the whole Drive for the root by name.
+
+### The three patient-level files
+
+The current frontend workflow maps to exactly three Drive slots:
+
+| Current app workflow | New Drive slot |
+|---|---|
+| Profile Photo | `Photo 1` |
+| Existing visit / before-after photo input | `Photo 2` |
+| Arboleaf PDF upload | `Arboleaf` |
+
+The profile-photo UI still uses its existing two entry points and remains one logical Photo 1 slot.
+
+The existing visit-photo input remains in the Visit modal. Because the new storage model allows only one patient-level Photo 2, the first selected image is stored and replaces the current Photo 2.
+
+The Arboleaf parser still reads the selected PDF in the browser exactly as before. The uploaded binary is now stored as the patient's single current `Arboleaf.pdf`. When a newer Arboleaf report is uploaded, the patient-level PDF is replaced; visits that already had an Arboleaf document keep their own parsed measurements/text while their PDF reference is updated to the new current patient file.
+
+### Replacement behaviour
+
+A replacement is created first and only then are previous files with the same slot name moved to the Drive trash. This prevents a failed upload from deleting the existing current file.
+
+The Drive folder therefore has, at most, one file for each of:
+
+- `Photo 1`
+- `Photo 2`
+- `Arboleaf`
+
+File extensions are preserved appropriately (`.jpg`, `.png`, `.pdf`, etc.). The canonical stored names never contain patient IDs, visit IDs, dates or duplicate suffixes.
+
+### Setup
+
+1. Open the Google Sheet used by Getwell.
+2. Go to **Extensions → Apps Script**.
+3. Replace `Code.gs` with the `Code.gs` from this project.
+4. Save.
+5. Run **`setupGetwellDriveStorage()`** once and approve the Drive permission it requests.
+6. In the execution log, confirm the Root Folder ID/URL and PATIENTS Folder ID/URL.
+7. Run **`setupGetwell()`** as usual for the Sheets setup. It also calls the Drive storage setup, so a fresh deployment can use that one-time function as well.
+8. Deploy the Apps Script as a **Web app**:
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+9. **Manage deployments → Edit → Version: New version** for every later `Code.gs` change.
+
+### Finding the new Drive folder
+
+Open Google Drive and search for:
+
+**GETWELL WEIGHT LOSS PATIENT FILES**
+
+The exact structure underneath should be:
+
+`GETWELL WEIGHT LOSS PATIENT FILES → PATIENTS → <PatientID> - <Patient Name>`
+
+If the patient name is unavailable at upload time, the folder falls back to `<PatientID>`. If the same patient folder already exists under `PATIENTS`, it is reused rather than duplicated.
+
+### Patient upload flow
+
+For a test patient such as `GW0001`:
+
+1. Upload/change the Profile Photo → stored as `Photo 1`.
+2. Upload a visit/before-after photo → stored as `Photo 2`.
+3. Upload an Arboleaf PDF → stored as `Arboleaf.pdf`.
+
+Google Sheets continues to store only file references/metadata. The binary files remain in Google Drive; base64 data is never written into Sheets.
+
+### Google Sheets compatibility
+
+Existing sheet names and canonical columns remain unchanged. The current `Patients.ProfilePhotoDriveID`, `Patients.ProfilePhotoUrl`, `Visits.PdfName`, `Visits.PdfFileId`, `Visits.PdfUrl` and `Files` references remain part of the existing data model.
+
+No old Google Drive folder IDs are used. No migration or recovery of legacy Drive files is performed.
+
+### Deployment URL
+
+The frontend still reads the Apps Script `/exec` URL from `GETWELL_SHEETS_API_URL` in `app.js`.
+
+- When the same Apps Script deployment URL is retained, no frontend URL change is required.
+- When a new Web App deployment produces a different `/exec` URL, replace the value of `GETWELL_SHEETS_API_URL` in `app.js` with the new `/exec` URL, commit the change, and publish the updated website.
+
+The new backend version is:
+
+`2026-09-19.drive-storage.1`
+
+The frontend expects that version before considering the new backend fully current.
+
+### Test checklist
+
+After deployment, verify:
+
+- `setupGetwellDriveStorage()` returns the new root and `PATIENTS` URLs.
+- A test upload creates one patient folder only.
+- The patient folder contains exactly `Photo 1`, `Photo 2` and `Arboleaf`.
+- Uploading Photo 1 again leaves one Photo 1.
+- Uploading Photo 2 again leaves one Photo 2.
+- Uploading another Arboleaf PDF leaves one Arboleaf.
+- Old Drive folders are not searched or used.
+- The existing Sheets record references are updated through the existing save workflow.
+- The existing Arboleaf measurements/parsing still work.
+
+### Privacy / sharing
+
+The current website expects Drive links to be directly viewable. The backend therefore preserves `DriveApp.Access.ANYONE_WITH_LINK` + `DriveApp.Permission.VIEW`. This means anyone who obtains a file's Drive link may be able to view that file; the clinic should treat the link as shareable access and change the access model only together with the website's viewing mechanism.
+
 ## Stability build — 26 August 2026
 
 This build intentionally disables automatic 30-second Google Sheets polling in the browser. The application must never interrupt a staff member who is navigating, typing into a form, or working inside a modal. Existing create/edit/delete actions continue to use the Google Sheets backend.
@@ -223,11 +351,11 @@ What each page preserves through a background sync:
 
 ## Files and photos
 
-Photos and Arboleaf PDFs are uploaded to a Google Drive folder
-named **Getwell Patient Files**; only `{id, name, url}` is
-stored in the sheet. This is deliberate: a Sheets cell holds at
-most 50,000 characters, so base64 images stored inline would
-break the save entirely.
+Photos and Arboleaf PDFs are uploaded into the new patient-level
+Drive tree under **GETWELL WEIGHT LOSS PATIENT FILES → PATIENTS**.
+Only `{id, name, url}`-style file references are stored in Sheets;
+the binary files remain in Drive because a Sheets cell holds at
+most 50,000 characters.
 
 If Drive is unreachable the file is kept in this browser only
 and is clearly badged **This device only** in Files & Photos.
@@ -280,8 +408,9 @@ Settings → Features are still hidden, as before.
 
 Every patient can have a profile picture. It is uploaded
 through the **same Apps Script `uploadFile` action** the visit
-photos and Arboleaf PDFs already use, so it lands in the
-existing **Getwell Patient Files** folder in Google Drive.
+photos and Arboleaf PDFs already use, so it is stored as the
+patient-level **Photo 1** inside the new **GETWELL WEIGHT LOSS
+PATIENT FILES → PATIENTS → `<PatientID> - <Patient Name>`** folder.
 
 | Field on the patient | Synced to Sheets | Holds |
 |---|---|---|

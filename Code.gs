@@ -67,9 +67,19 @@
   makes "the deployment is behind the code" a visible error
   rather than a silent one.
 */
-var GETWELL_BACKEND_VERSION = "2026-09-06.arboleaf-pdf.1";
+var GETWELL_BACKEND_VERSION = "2026-09-19.drive-storage.1";
 
-var GETWELL_DRIVE_FOLDER = "Getwell Patient Files";
+/*
+  NEW GOOGLE DRIVE STORAGE
+  ------------------------
+  This build intentionally starts a fresh storage tree. The old
+  "Getwell Patient Files" / WLMS / tracker folders are not used,
+  searched, migrated, renamed or deleted.
+*/
+var GETWELL_DRIVE_ROOT_NAME = "GETWELL WEIGHT LOSS PATIENT FILES";
+var GETWELL_DRIVE_PATIENTS_NAME = "PATIENTS";
+var GETWELL_DRIVE_ROOT_ID_PROPERTY = "GETWELL_DRIVE_ROOT_ID";
+var GETWELL_DRIVE_PATIENTS_ID_PROPERTY = "GETWELL_DRIVE_PATIENTS_ID";
 
 var SHEETS = {
   PATIENTS:     "Patients",
@@ -103,9 +113,9 @@ var HEADERS = {
       which the front end treats as "no photo yet".
 
       Only the Drive ID and the Drive URL are stored. The
-      image itself lives in the Getwell Patient Files folder
-      in Google Drive, exactly like visit photos, because a
-      Sheets cell holds at most 50,000 characters.
+      image itself lives in the patient's Photo 1 slot inside
+      the new Getwell patient Drive tree, because a Sheets cell
+      holds at most 50,000 characters.
     */
     "ProfilePhotoDriveID","ProfilePhotoUrl",
 
@@ -257,7 +267,10 @@ function setupGetwell(){
 
   installGetwellEditTrigger();
 
-  return "Getwell setup complete. Sheets, date columns and the onEdit trigger are ready.";
+  /* Also make the fresh Drive tree ready in the normal one-time setup. */
+  setupGetwellDriveStorage();
+
+  return "Getwell setup complete. Sheets, date columns, the onEdit trigger and Drive storage are ready.";
 }
 
 
@@ -1229,83 +1242,480 @@ function describeMissing(result){
 
 
 /* ---------------------------------------------------------
-   DRIVE FILE STORAGE
+   NEW GOOGLE DRIVE FILE STORAGE
+   ---------------------------------------------------------
+   Final tree:
+
+     GETWELL WEIGHT LOSS PATIENT FILES
+       └── PATIENTS
+           └── <PatientID> - <Patient Name>
+               ├── Photo 1
+               ├── Photo 2
+               └── Arboleaf
+
+   There are no visit folders, photo folders, upload folders,
+   archives, unassigned folders or legacy storage dependencies.
+
+   The source of truth for the root is Script Properties:
+     GETWELL_DRIVE_ROOT_ID
+   PATIENTS is also persisted as:
+     GETWELL_DRIVE_PATIENTS_ID
 --------------------------------------------------------- */
 
-function getDriveFolder(){
-  var existing = DriveApp.getFoldersByName(GETWELL_DRIVE_FOLDER);
-  return existing.hasNext()
-    ? existing.next()
-    : DriveApp.createFolder(GETWELL_DRIVE_FOLDER);
+/* Safe folder lookup from a saved Script Property. */
+function getFolderFromProperty_(propertyKey, expectedName){
+  var id = PropertiesService.getScriptProperties().getProperty(propertyKey);
+  if(!id) return null;
+
+  try{
+    var folder = DriveApp.getFolderById(id);
+    if(expectedName && folder.getName() !== expectedName) return null;
+    return folder;
+  }catch(error){
+    return null;
+  }
+}
+
+
+/* Find or create the one canonical root folder. */
+function ensureGetwellDriveRoot_(){
+  var props = PropertiesService.getScriptProperties();
+  var root  = getFolderFromProperty_(
+    GETWELL_DRIVE_ROOT_ID_PROPERTY,
+    GETWELL_DRIVE_ROOT_NAME
+  );
+
+  if(root){
+    props.setProperty(GETWELL_DRIVE_ROOT_ID_PROPERTY, root.getId());
+    return root;
+  }
+
+  /*
+    This lookup is intentionally used ONLY during setup/recovery.
+    Normal uploads use the saved folder ID and do not repeatedly
+    scan Drive by name.
+  */
+  var matches = DriveApp.getFoldersByName(GETWELL_DRIVE_ROOT_NAME);
+  root = matches.hasNext()
+    ? matches.next()
+    : DriveApp.createFolder(GETWELL_DRIVE_ROOT_NAME);
+
+  props.setProperty(GETWELL_DRIVE_ROOT_ID_PROPERTY, root.getId());
+  return root;
+}
+
+
+/* Make sure PATIENTS exists directly under the canonical root. */
+function ensureGetwellDrivePatientsFolder_(){
+  var props    = PropertiesService.getScriptProperties();
+  var root     = ensureGetwellDriveRoot_();
+  var patients = getFolderFromProperty_(
+    GETWELL_DRIVE_PATIENTS_ID_PROPERTY,
+    GETWELL_DRIVE_PATIENTS_NAME
+  );
+
+  /*
+    A stale PATIENTS id must never be accepted if it does not
+    actually sit inside our new root.
+  */
+  if(patients){
+    var parents = patients.getParents();
+    var directChild = false;
+    while(parents.hasNext()){
+      if(parents.next().getId() === root.getId()){
+        directChild = true;
+        break;
+      }
+    }
+    if(!directChild) patients = null;
+  }
+
+  if(!patients){
+    var children = root.getFoldersByName(GETWELL_DRIVE_PATIENTS_NAME);
+    patients = children.hasNext()
+      ? children.next()
+      : root.createFolder(GETWELL_DRIVE_PATIENTS_NAME);
+
+    props.setProperty(GETWELL_DRIVE_PATIENTS_ID_PROPERTY, patients.getId());
+  }
+
+  return patients;
+}
+
+
+/*
+  Explicit one-time setup / recovery entry point requested for
+  the new Drive storage.
+*/
+function setupGetwellDriveStorage(){
+  var lock = LockService.getScriptLock();
+
+  try{
+    lock.waitLock(25000);
+  }catch(error){
+    throw new Error("The Drive setup is busy. Please run it again.");
+  }
+
+  try{
+    var root     = ensureGetwellDriveRoot_();
+    var patients = ensureGetwellDrivePatientsFolder_();
+
+    var result = {
+      rootFolderName: root.getName(),
+      rootFolderId:   root.getId(),
+      rootFolderUrl:  root.getUrl(),
+      patientsFolderName: patients.getName(),
+      patientsFolderId: patients.getId(),
+      patientsFolderUrl: patients.getUrl()
+    };
+
+    console.log("Root Folder Name: " + result.rootFolderName);
+    console.log("Root Folder ID: "   + result.rootFolderId);
+    console.log("Root Folder URL: "  + result.rootFolderUrl);
+    console.log("PATIENTS Folder ID: "  + result.patientsFolderId);
+    console.log("PATIENTS Folder URL: " + result.patientsFolderUrl);
+
+    return result;
+
+  }finally{
+    lock.releaseLock();
+  }
+}
+
+
+/* Root source of truth. If the saved id is invalid, recover safely. */
+function getGetwellDriveRootFolder_(){
+  return ensureGetwellDriveRoot_();
+}
+
+
+/* PATIENTS source of truth. */
+function getGetwellDrivePatientsFolder_(){
+  return ensureGetwellDrivePatientsFolder_();
+}
+
+
+/*
+  Look up a patient name from the existing Patients sheet when
+  the frontend did not include one (backward-compatible upload
+  payloads). This does not migrate or search any old Drive data.
+*/
+function getPatientNameForDrive_(patientId, suppliedName){
+  var supplied = toText(suppliedName).trim();
+  if(supplied) return supplied;
+
+  try{
+    var rows = readSheet(SHEETS.PATIENTS);
+    var match = rows.find(function(row){
+      return toText(row.PatientID).trim() === patientId;
+    });
+    return match ? toText(match.Name).trim() : "";
+  }catch(error){
+    return "";
+  }
+}
+
+
+/* Exact requested patient folder name, with ID-only fallback. */
+function buildPatientFolderName_(patientId, patientName){
+  var name = toText(patientName).trim();
+  return name ? (patientId + " - " + name) : patientId;
+}
+
+
+/*
+  Reuse one patient folder. Name changes do not create duplicates:
+  a folder starting with "<PatientID> - " is treated as the same
+  patient's folder and is renamed to the current patient name.
+*/
+function getOrCreatePatientDriveFolder_(patientId, patientName){
+  var patients = getGetwellDrivePatientsFolder_();
+  var expected = buildPatientFolderName_(patientId, patientName);
+  var folders  = patients.getFolders();
+  var candidate = null;
+
+  while(folders.hasNext()){
+    var folder = folders.next();
+    var name   = folder.getName();
+
+    if(name === expected){
+      return folder;
+    }
+
+    if(name === patientId || name.indexOf(patientId + " - ") === 0){
+      candidate = folder;
+    }
+  }
+
+  if(candidate){
+    if(candidate.getName() !== expected && toText(patientName).trim()){
+      candidate.setName(expected);
+    }
+    return candidate;
+  }
+
+  return patients.createFolder(expected);
+}
+
+
+/* Get the base-name before the extension for one of our fixed slots. */
+function driveBaseName_(name){
+  return toText(name).replace(/\.[^.]+$/, "");
+}
+
+
+function isDriveSlotName_(name, slot){
+  return driveBaseName_(name).toLowerCase() === slot.toLowerCase();
+}
+
+
+/*
+  Returns only the files for one canonical patient-level slot.
+  Calling this on the patient folder is intentionally narrow.
+*/
+function getDriveSlotFiles_(patientFolder, slot){
+  var files = patientFolder.getFiles();
+  var found = [];
+
+  while(files.hasNext()){
+    var file = files.next();
+    if(isDriveSlotName_(file.getName(), slot)){
+      found.push(file);
+    }
+  }
+
+  return found;
+}
+
+
+/* Pick the clean extension for the final file name. */
+function getDriveExtension_(payload, mime){
+  var type = String(mime || "").toLowerCase();
+
+  if(type === "application/pdf") return ".pdf";
+  if(type === "image/jpeg" || type === "image/jpg") return ".jpg";
+  if(type === "image/png") return ".png";
+  if(type === "image/webp") return ".webp";
+  if(type === "image/gif") return ".gif";
+
+  var original = toText(payload && payload.name);
+  var match = original.match(/(\.[a-z0-9]{1,8})$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+
+/*
+  Determines one of the ONLY three allowed Drive files.
+  Existing frontend payloads are still understood:
+    - visitId "profile" + image => Photo 1
+    - any other image            => Photo 2
+    - application/pdf            => Arboleaf
+  New optional "kind" values make the intent explicit without
+  changing the existing request shape.
+*/
+function getDriveUploadSlot_(payload){
+  var mime = String(toText(payload && payload.mimeType)).toLowerCase();
+  var kind = String(toText(payload && payload.kind)).toLowerCase();
+  var visitId = String(toText(payload && payload.visitId)).toLowerCase();
+
+  if(
+    kind === "arboleaf" ||
+    mime === "application/pdf"
+  ){
+    return "Arboleaf";
+  }
+
+  if(
+    kind === "patient-photo-1" ||
+    (mime.indexOf("image/") === 0 && visitId === "profile")
+  ){
+    return "Photo 1";
+  }
+
+  if(
+    kind === "patient-photo-2" ||
+    mime.indexOf("image/") === 0
+  ){
+    return "Photo 2";
+  }
+
+  return "";
+}
+
+
+/*
+  A file is valid for delete only when it is directly inside a
+  patient folder belonging to THIS app's current PATIENTS tree,
+  and it has one of the three canonical slot names.
+*/
+function isFileInGetwellPatientStorage_(file){
+  var patients = getGetwellDrivePatientsFolder_();
+  var parents  = file.getParents();
+
+  while(parents.hasNext()){
+    var parent = parents.next();
+
+    if(!isDriveSlotName_(file.getName(), "Photo 1") &&
+       !isDriveSlotName_(file.getName(), "Photo 2") &&
+       !isDriveSlotName_(file.getName(), "Arboleaf")){
+      continue;
+    }
+
+    var grandParents = parent.getParents();
+    while(grandParents.hasNext()){
+      if(grandParents.next().getId() === patients.getId()){
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 
 function storeDriveFile(payload){
+  var lock = LockService.getScriptLock();
+  try{
+    lock.waitLock(25000);
+  }catch(error){
+    return {ok:false, error:"The Drive upload is busy. Please try again."};
+  }
+
+  try{
+    return storeDriveFileLocked_(payload);
+  }finally{
+    lock.releaseLock();
+  }
+}
+
+
+/* Serialized upload implementation: prevents concurrent requests
+   from creating duplicate patient folders or duplicate slot files. */
+function storeDriveFileLocked_(payload){
   if(!payload || !payload.dataBase64){
     return {ok:false, error:"No file content was received."};
   }
 
+  var patientId = toText(payload.patientId).trim();
+  if(!patientId){
+    return {ok:false, error:"No PatientID was supplied for the upload."};
+  }
+
+  var mime = toText(payload.mimeType) || "application/octet-stream";
+  var slot = getDriveUploadSlot_(payload);
+
+  if(!slot){
+    return {
+      ok:false,
+      error:"This upload is not a supported Getwell patient file. Only Photo 1, Photo 2 and Arboleaf are allowed."
+    };
+  }
+
+  var patientName = getPatientNameForDrive_(
+    patientId,
+    payload.patientName
+  );
+
+  var patientFolder = getOrCreatePatientDriveFolder_(
+    patientId,
+    patientName
+  );
+
+  var extension = getDriveExtension_(payload, mime);
+  var finalName = slot + extension;
+
   var bytes = Utilities.base64Decode(payload.dataBase64);
-  var name  = toText(payload.name) || "getwell-upload";
-  var mime  = toText(payload.mimeType) || "application/octet-stream";
+  var blob  = Utilities.newBlob(bytes, mime, finalName);
+  var file;
 
-  var prefix = [toText(payload.patientId), toText(payload.visitId)]
-    .filter(function(part){ return part; })
-    .join("-");
+  try{
+    /*
+      Create the replacement FIRST. The old current file stays
+      available until the new file has been created and shared.
+    */
+    file = patientFolder.createFile(blob);
 
-  var blob = Utilities.newBlob(bytes, mime, prefix ? (prefix + "-" + name) : name);
-  var file = getDriveFolder().createFile(blob);
+    /*
+      Existing website image/PDF links depend on link-sharing.
+      Preserve that access model for compatibility. Clinic policy
+      should treat these links as non-private: anyone who has the
+      link can view the file.
+    */
+    file.setSharing(
+      DriveApp.Access.ANYONE_WITH_LINK,
+      DriveApp.Permission.VIEW
+    );
+
+  }catch(error){
+    try{
+      if(file) file.setTrashed(true);
+    }catch(ignore){}
+
+    return {
+      ok:false,
+      error:"The Google Drive file could not be created or shared: " + String(error)
+    };
+  }
+
+  var replaced = getDriveSlotFiles_(patientFolder, slot)
+    .filter(function(existing){
+      return existing.getId() !== file.getId();
+    })
+    .map(function(existing){
+      return existing.getId();
+    });
 
   /*
-    Anyone with the link can view, so the <img> tag in the web
-    app can render it. Remove this line if the clinic's policy
-    requires per-user Drive permissions instead.
+    Replacement is physical replacement in the new patient folder.
+    This guarantees there is only ONE file with each canonical slot
+    name even if an earlier run left duplicates.
   */
-  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  getDriveSlotFiles_(patientFolder, slot).forEach(function(existing){
+    if(existing.getId() !== file.getId()){
+      try{ existing.setTrashed(true); }catch(error){
+        console.warn("Unable to trash replaced " + slot + ": " + error);
+      }
+    }
+  });
 
   return {
     ok: true,
     file: {
-      id:   file.getId(),
-      name: file.getName(),
-      url:  "https://drive.google.com/uc?export=view&id=" + file.getId(),
-      link: file.getUrl()
+      id:             file.getId(),
+      name:           file.getName(),
+      url:            "https://drive.google.com/uc?export=view&id=" + file.getId(),
+      link:           file.getUrl(),
+      slot:           slot,
+      patientFolderId: patientFolder.getId(),
+      patientFolderUrl: patientFolder.getUrl(),
+      replacedFileIds: replaced
     }
   };
 }
 
 
 /*
-  Remove ONE uploaded file.
+  Remove ONE current patient-level file.
 
-  Used by "Remove PDF" on a visit. Deliberately narrow:
-
-    * it moves a single file to the Drive trash, where it can
-      still be recovered by the account owner;
-    * it refuses any file that is not inside this app's own
-      upload folder, so an id typed or guessed by mistake
-      cannot reach anything else in the clinic's Drive;
-    * it never touches a spreadsheet. No patient, visit,
-      appointment, claim or measurement is read or changed by
-      this function.
---------------------------------------------------------- */
+  This is deliberately narrow: legacy file IDs and files outside
+  the new PATIENTS tree are rejected instead of being touched.
+*/
 function removeDriveFile(fileId){
   var id = toText(fileId);
   if(!id) return {ok:false, error:"No file id was received."};
 
   var file;
-  try{ file = DriveApp.getFileById(id); }
-  catch(error){ return {ok:false, error:"That file is not available: " + String(error)}; }
-
-  var folder = getDriveFolder();
-  var inFolder = false;
-  var parents = file.getParents();
-  while(parents.hasNext()){
-    if(parents.next().getId() === folder.getId()){ inFolder = true; break; }
+  try{
+    file = DriveApp.getFileById(id);
+  }catch(error){
+    return {ok:false, error:"That file is not available: " + String(error)};
   }
 
-  if(!inFolder){
-    return {ok:false, error:"That file is not in the " + GETWELL_DRIVE_FOLDER + " folder, so it was left alone."};
+  if(!isFileInGetwellPatientStorage_(file)){
+    return {
+      ok:false,
+      error:"That file is not inside the current Getwell patient storage and was left untouched."
+    };
   }
 
   file.setTrashed(true);

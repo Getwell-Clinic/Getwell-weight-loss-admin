@@ -1,26 +1,33 @@
 GETWELL WEIGHT LOSS ADMIN — SAFE GOOGLE SHEETS DEPLOYMENT
-Build: 2026-09-03.next-expected.1
+Build: 2026-09-19.drive-storage.1
 
 IMPORTANT: Google Sheets is the permanent data store. This build never clears the Patients, Visits, Claims, Charges, Appointments or Files tabs during a normal save. It updates/creates records by stable ID and verifies the IDs after writing.
 
 1. Open the SAME Google Sheet used by the clinic.
 2. Extensions -> Apps Script.
 3. Replace ALL contents of Code.gs with the Code.gs included in this project. Save.
-4. Run setupGetwell() once. Approve permissions if Google asks.
-5. If the old project already has data, DO NOT delete any tabs or rows.
-6. Deploy -> Manage deployments.
-7. Open the existing Web app deployment with the pencil icon.
-8. Select Version -> New version, then Deploy. Keep the same /exec URL if possible.
-9. The Web app must use:
+4. Run setupGetwellDriveStorage() once. Approve Drive permissions if Google asks. It creates:
+   GETWELL WEIGHT LOSS PATIENT FILES -> PATIENTS
+5. Run setupGetwell() once for the existing Sheets setup. It also verifies the Drive tree.
+6. If the old project already has data, DO NOT delete any tabs or rows.
+7. Deploy -> Manage deployments.
+8. Open the existing Web app deployment with the pencil icon.
+9. Select Version -> New version, then Deploy. Keep the same /exec URL if possible.
+10. The Web app must use:
    Execute as: Me
    Who has access: Anyone
-10. Put the existing /exec URL in app.js at GETWELL_SHEETS_API_URL. Do not use a /dev URL.
-11. Push the whole project folder to GitHub, including the updated Code.gs and app.js.
-12. Test the deployment in a browser:
+11. Put the existing /exec URL in app.js at GETWELL_SHEETS_API_URL. Do not use a /dev URL.
+12. Push the whole project folder to GitHub, including the updated Code.gs and app.js.
+13. Test the deployment in a browser:
    YOUR_EXEC_URL?action=diagnose
-   The JSON must show version 2026-09-03.next-expected.1.
-13. Open the web app and refresh. The backend-version warning should be gone.
-14. Before real clinic use, create one test patient and one test visit. Confirm both rows appear in Google Sheets. Then edit the visit and save again; it should update the same VisitID rather than create a duplicate.
+   The JSON must show version 2026-09-19.drive-storage.1.
+14. Open the web app and refresh. The backend-version warning should be gone.
+15. Before real clinic use, create one test patient and one test visit. Confirm both rows appear in Google Sheets. Then edit the visit and save again; it should update the same VisitID rather than create a duplicate.
+16. Test Drive storage with one patient:
+   - Profile photo -> Photo 1
+   - Visit/before-after photo -> Photo 2
+   - Arboleaf PDF -> Arboleaf
+   Re-upload each one and confirm no duplicate slot file is left in the patient folder.
 
 DO NOT:
 - Do not use the Apps Script /dev URL in the live web app.

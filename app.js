@@ -1465,7 +1465,7 @@ const GETWELL_UNCONFIRMED_KEY = "GETWELL_UNCONFIRMED_V1";
 /* The Code.gs contract this build expects. A deployment that does
    not report a version at all is older than the verified-write
    backend and cannot prove that a visit reached the sheet. */
-const GETWELL_REQUIRED_BACKEND = "2026-09-03.next-expected.1";
+const GETWELL_REQUIRED_BACKEND = "2026-09-19.drive-storage.1";
 
 const GETWELL_RECORD_KEYS =
   ["patients","appointments","visits","charges","claims","files"];
@@ -2029,7 +2029,9 @@ function getwellUploadFile(file){
           mimeType: file.mimeType,
           dataBase64: file.dataBase64,
           patientId: file.patientId || "",
-          visitId: file.visitId || ""
+          visitId: file.visitId || "",
+          patientName: file.patientName || "",
+          kind: file.kind || ""
         }
       })
     }
@@ -4203,8 +4205,8 @@ function getwellDataUrlToBase64(dataUrl){
    UPLOAD
    Reuses getwellUploadFile(), which is the same Apps Script
    "uploadFile" action the visit photos and Arboleaf PDFs
-   already go through, so the file lands in the existing
-   Getwell Patient Files folder in Drive.
+   already go through, so the file lands in the current patient's
+   Photo 1 slot under the new Getwell Drive storage tree.
 --------------------------------------------------------- */
 
 function getwellUploadPatientPhoto(patient, file){
@@ -4223,7 +4225,9 @@ function getwellUploadPatientPhoto(patient, file){
         mimeType: "image/jpeg",
         dataBase64: getwellDataUrlToBase64(resized.dataUrl),
         patientId: patient.id || "",
-        visitId: "profile"
+        visitId: "profile",
+        patientName: patient.name || "",
+        kind: "patient-photo-1"
       })
       .then(uploaded => {
         if(uploaded.ok && uploaded.file){
